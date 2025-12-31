@@ -7,6 +7,7 @@ This guide will help you set up the job scraper bot to run 24/7 on your Ubuntu s
 1. Python 3.10+ installed on your Ubuntu server
 2. The job scraper files (`main.py` and `requirements.txt`) in a directory on your server
 3. A Discord webhook URL (optional but recommended)
+4. **Note:** This bot uses Playwright to scrape JavaScript-rendered content, so Chromium browser will be installed automatically
 
 ## Step 1: Install Dependencies
 
@@ -20,6 +21,9 @@ source venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt
+
+# Install Playwright browsers (required for scraping JavaScript-rendered content)
+playwright install chromium
 ```
 
 ## Step 2: Set Up Environment Variables

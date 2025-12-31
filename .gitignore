@@ -30,3 +30,7 @@ Thumbs.db
 cursor_prompt.md
 Nuno_Cv_Ing.pdf
 
+# Local Bot Memory (Keep this local only!)
+seen_jobs.json
+debug_*.png
+

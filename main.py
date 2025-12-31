@@ -2,19 +2,22 @@
 """
 Daily Job Scraper & Ranking Bot
 Scrapes Web3/Crypto job boards and ranks them based on Nuno's profile.
+Uses Playwright for JavaScript-rendered content.
 """
 
 import os
 import re
 import json
 import logging
+import asyncio
 from datetime import datetime
 from typing import List, Dict, Optional
 from dataclasses import dataclass, asdict
 from enum import Enum
 
-import requests
+from playwright.async_api import async_playwright, Browser, Page, TimeoutError as PlaywrightTimeoutError
 from bs4 import BeautifulSoup
+import requests
 import schedule
 import time
 from pydantic import BaseModel, HttpUrl
@@ -151,51 +154,215 @@ class JobRanker:
         return JobPriority.WEAK_MATCH, "No strong match criteria"
 
 
-class JobScraper:
-    """Base scraper class"""
+class PlaywrightBrowserManager:
+    """Manages Playwright browser instance"""
     
-    def __init__(self, source_name: str, base_url: str):
+    _browser: Optional[Browser] = None
+    _playwright = None
+    
+    @classmethod
+    async def get_browser(cls) -> Browser:
+        """Get or create browser instance"""
+        if cls._browser is None:
+            cls._playwright = await async_playwright().start()
+            cls._browser = await cls._playwright.chromium.launch(
+                headless=True,
+                args=[
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-accelerated-2d-canvas',
+                    '--disable-gpu',
+                    '--disable-blink-features=AutomationControlled',
+                    '--disable-features=IsolateOrigins,site-per-process',
+                ]
+            )
+        return cls._browser
+    
+    @classmethod
+    async def close_browser(cls):
+        """Close browser instance"""
+        if cls._browser:
+            await cls._browser.close()
+            cls._browser = None
+        if cls._playwright:
+            await cls._playwright.stop()
+            cls._playwright = None
+    
+    @classmethod
+    async def create_page(cls) -> Page:
+        """Create a new page with stealth settings"""
+        browser = await cls.get_browser()
+        page = await browser.new_page()
+        
+        # Set realistic user agent
+        await page.set_extra_http_headers({
+            'Accept-Language': 'en-US,en;q=0.9',
+        })
+        await page.set_viewport_size({"width": 1920, "height": 1080})
+        
+        # Remove webdriver property
+        await page.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+        """)
+        
+        return page
+
+
+class JobScraper:
+    """Base scraper class using Playwright"""
+    
+    def __init__(self, source_name: str, base_url: str, job_list_selector: str = None, wait_timeout: int = 30000):
         self.source_name = source_name
         self.base_url = base_url
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        })
+        self.search_url = base_url
+        self.job_list_selector = job_list_selector  # Selector to wait for job list to load
+        self.wait_timeout = wait_timeout  # Timeout in milliseconds
 
-    def scrape(self) -> List[Job]:
+    async def scrape(self) -> List[Job]:
         """Scrape jobs from the source. Override in subclasses."""
         raise NotImplementedError
 
     def parse_job(self, element, job_url: str = None) -> Optional[Job]:
         """Parse a job element. Override in subclasses."""
         raise NotImplementedError
+    
+    async def get_page_content(self, url: str, take_screenshot: bool = False, screenshot_path: str = None) -> tuple[Optional[str], Optional[Page]]:
+        """Get page content after JavaScript rendering
+        
+        Returns:
+            tuple: (content, page) - Returns content and page object if take_screenshot is True
+        """
+        page = None
+        try:
+            page = await PlaywrightBrowserManager.create_page()
+            logger.info(f"Loading {url}...")
+            
+            # Use 'domcontentloaded' instead of 'networkidle' to avoid timeouts
+            await page.goto(url, wait_until='domcontentloaded', timeout=self.wait_timeout)
+            
+            # Wait for body to ensure page is ready
+            try:
+                await page.wait_for_selector('body', timeout=5000)
+            except PlaywrightTimeoutError:
+                logger.warning(f"Body not found for {self.source_name}, continuing anyway...")
+            
+            # Wait for job list to load if selector is provided
+            if self.job_list_selector:
+                try:
+                    # Try to wait for any job-related element
+                    await page.wait_for_selector('body', timeout=5000)
+                    # Additional wait for content to render
+                    await page.wait_for_timeout(3000)  # 3 seconds for JS to render
+                    logger.info(f"Page loaded for {self.source_name}")
+                except PlaywrightTimeoutError:
+                    logger.warning(f"Timeout waiting for content on {self.source_name}, continuing anyway...")
+            
+            # Wait a bit more for any lazy-loaded content
+            await page.wait_for_timeout(2000)  # 2 seconds
+            
+            # Take screenshot if requested
+            if take_screenshot and screenshot_path:
+                try:
+                    await page.screenshot(path=screenshot_path, full_page=True)
+                    logger.info(f"Debug screenshot saved to {screenshot_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to take screenshot: {e}")
+            
+            # Get the rendered HTML
+            content = await page.content()
+            
+            if take_screenshot:
+                return content, page  # Return page if screenshot was requested
+            else:
+                return content, None
+            
+        except Exception as e:
+            logger.error(f"Error loading page {url}: {e}")
+            return None, None
+        finally:
+            if page and not take_screenshot:
+                await page.close()
 
 
 class Web3CareerScraper(JobScraper):
     """Scraper for Web3.career"""
     
     def __init__(self):
-        super().__init__("Web3.career", "https://web3.career")
-        # Focus on technical support/infra roles
-        self.search_url = "https://web3.career/jobs?keywords=devops+sysadmin+support+infrastructure"
+        super().__init__(
+            "Web3.career",
+            "https://web3.career",
+            job_list_selector='tbody tr, div.table_row',  # Table rows or table row divs
+            wait_timeout=30000
+        )
+        # Use remote-jobs page (jobs page returns 404)
+        self.search_url = "https://web3.career/remote-jobs"
 
-    def scrape(self) -> List[Job]:
+    async def scrape(self) -> List[Job]:
         """Scrape Web3.career"""
         jobs = []
+        page = None
         try:
             logger.info(f"Scraping {self.source_name}...")
-            response = self.session.get(self.search_url, timeout=30)
-            response.raise_for_status()
+            content, _ = await self.get_page_content(self.search_url)
             
-            soup = BeautifulSoup(response.content, 'html.parser')
+            if not content:
+                # Try homepage as fallback
+                logger.info(f"Trying homepage for {self.source_name}...")
+                content, _ = await self.get_page_content(self.base_url)
             
-            # Web3.career structure may vary - this is a generic approach
-            # Look for job listings (common selectors)
-            job_elements = soup.find_all(['article', 'div'], class_=re.compile(r'job|listing|card', re.I))
+            if not content:
+                return jobs
+            
+            soup = BeautifulSoup(content, 'html.parser')
+            
+            # Web3.career: Uses table structure - target tbody tr or div.table_row
+            job_elements = soup.select('tbody tr')
             
             if not job_elements:
-                # Try alternative selectors
+                # Try div.table_row
+                job_elements = soup.find_all('div', class_=re.compile(r'table_row|table-row', re.I))
+            
+            if not job_elements:
+                # Fallback: Try divs with row class
+                job_elements = soup.find_all('div', class_=re.compile(r'row', re.I))
+            
+            if not job_elements:
+                # Try table rows without tbody
+                job_elements = soup.find_all('tr', class_=re.compile(r'job|listing|row', re.I))
+            
+            if not job_elements:
+                # Try article or div elements with job-related classes
+                job_elements = soup.find_all(['article', 'div'], class_=re.compile(r'job|listing|card', re.I))
+            
+            if not job_elements:
+                # Try links to job pages
                 job_elements = soup.find_all('a', href=re.compile(r'/job/|/jobs/'))
+            
+            if not job_elements:
+                # Try more generic selectors
+                job_elements = soup.find_all(['div', 'li'], attrs={'data-job-id': True}) or \
+                              soup.find_all(['div', 'li'], class_=re.compile(r'item|post', re.I))
+            
+            logger.info(f"Found {len(job_elements)} potential job elements from {self.source_name}")
+            
+            # Debug: Take screenshot if 0 jobs found
+            if len(job_elements) == 0:
+                logger.warning("Found 0 jobs. Taking debug screenshot...")
+                # Re-fetch page with screenshot
+                screenshot_path = "debug_web3_career.png"
+                content, page = await self.get_page_content(self.search_url, take_screenshot=True, screenshot_path=screenshot_path)
+                if not content:
+                    # Try homepage
+                    content, page = await self.get_page_content(self.base_url, take_screenshot=True, screenshot_path=screenshot_path)
+                logger.info(f"Debug screenshot saved to {screenshot_path}")
+            
+            # Debug: Print first element HTML if elements found but no jobs parsed
+            if len(job_elements) > 0:
+                first_element_html = str(job_elements[0])[:500]  # First 500 chars
+                logger.debug(f"First element HTML sample: {first_element_html}")
             
             for element in job_elements[:20]:  # Limit to first 20
                 try:
@@ -205,33 +372,45 @@ class Web3CareerScraper(JobScraper):
                 except Exception as e:
                     logger.warning(f"Error parsing job element: {e}")
                     continue
+            
+            # Debug output if elements found but no jobs parsed
+            if len(job_elements) > 0 and len(jobs) == 0:
+                logger.warning(f"Found {len(job_elements)} elements but parsed 0 jobs. First element HTML:")
+                logger.warning(str(job_elements[0])[:1000])  # Print first 1000 chars for debugging
                     
         except Exception as e:
             logger.error(f"Error scraping {self.source_name}: {e}")
+        finally:
+            if page:
+                await page.close()
         
         return jobs
 
     def parse_job(self, element, job_url: str = None) -> Optional[Job]:
-        """Parse a Web3.career job element"""
+        """Parse a Web3.career job element (tr.table_row structure)"""
         try:
-            # Extract title
-            title_elem = element.find(['h2', 'h3', 'a'], class_=re.compile(r'title|job-title', re.I))
-            if not title_elem:
-                title_elem = element.find('a', href=re.compile(r'/job/'))
-            
+            # Web3.career uses tr.table_row structure
+            # Extract title from h2 tag inside the row
+            title_elem = element.find('h2')
             if not title_elem:
                 return None
             
             title = title_elem.get_text(strip=True)
+            if not title or len(title) < 5:  # Skip if title is too short
+                return None
             
-            # Extract URL
+            # Extract URL from first a tag inside the row
             link = element.find('a', href=True)
-            if link:
-                url = link['href']
-                if not url.startswith('http'):
-                    url = f"{self.base_url}{url}"
-            else:
-                url = job_url or self.base_url
+            if not link:
+                return None
+            
+            url = link.get('href', '')
+            if not url:
+                return None
+            
+            # Handle relative links
+            if not url.startswith('http'):
+                url = f"{self.base_url}{url}"
             
             # Extract company
             company_elem = element.find(['span', 'div', 'p'], class_=re.compile(r'company', re.I))
@@ -269,24 +448,43 @@ class CryptoJobsListScraper(JobScraper):
     """Scraper for CryptoJobsList.com"""
     
     def __init__(self):
-        super().__init__("CryptoJobsList.com", "https://cryptojobslist.com")
-        self.search_url = "https://cryptojobslist.com/jobs"
+        super().__init__(
+            "CryptoJobsList.com",
+            "https://cryptojobslist.com",
+            job_list_selector='article, [class*="job"], [class*="listing"]',
+            wait_timeout=30000
+        )
+        self.search_url = "https://cryptojobslist.com"
 
-    def scrape(self) -> List[Job]:
+    async def scrape(self) -> List[Job]:
         """Scrape CryptoJobsList.com"""
         jobs = []
         try:
             logger.info(f"Scraping {self.source_name}...")
-            response = self.session.get(self.search_url, timeout=30)
-            response.raise_for_status()
+            content, _ = await self.get_page_content(self.search_url)
             
-            soup = BeautifulSoup(response.content, 'html.parser')
+            if not content:
+                return jobs
+            
+            soup = BeautifulSoup(content, 'html.parser')
             
             # Look for job listings
             job_elements = soup.find_all(['article', 'div', 'li'], class_=re.compile(r'job|listing|card|item', re.I))
             
             if not job_elements:
                 job_elements = soup.find_all('a', href=re.compile(r'/job/|/jobs/|/position/'))
+            
+            if not job_elements:
+                # Try more generic selectors
+                job_elements = soup.find_all(['div', 'section'], attrs={'data-job': True}) or \
+                              soup.find_all(['div', 'li'], class_=re.compile(r'post|entry', re.I))
+            
+            logger.info(f"Found {len(job_elements)} potential job elements from {self.source_name}")
+            
+            # Debug: Print first element HTML if elements found
+            if len(job_elements) > 0:
+                first_element_html = str(job_elements[0])[:500]  # First 500 chars
+                logger.debug(f"First element HTML sample: {first_element_html}")
             
             for element in job_elements[:20]:
                 try:
@@ -296,6 +494,11 @@ class CryptoJobsListScraper(JobScraper):
                 except Exception as e:
                     logger.warning(f"Error parsing job element: {e}")
                     continue
+            
+            # Debug output if elements found but no jobs parsed
+            if len(job_elements) > 0 and len(jobs) == 0:
+                logger.warning(f"Found {len(job_elements)} elements but parsed 0 jobs. First element HTML:")
+                logger.warning(str(job_elements[0])[:1000])  # Print first 1000 chars for debugging
                     
         except Exception as e:
             logger.error(f"Error scraping {self.source_name}: {e}")
@@ -313,6 +516,8 @@ class CryptoJobsListScraper(JobScraper):
                 return None
             
             title = title_elem.get_text(strip=True)
+            if not title or len(title) < 5:
+                return None
             
             link = element.find('a', href=True)
             if link:
@@ -354,37 +559,117 @@ class CryptocurrencyJobsScraper(JobScraper):
     """Scraper for CryptocurrencyJobs.co"""
     
     def __init__(self):
-        super().__init__("CryptocurrencyJobs.co", "https://cryptocurrencyjobs.co")
+        super().__init__(
+            "CryptocurrencyJobs.co",
+            "https://cryptocurrencyjobs.co",
+            job_list_selector='article, [class*="job"], [class*="listing"]',
+            wait_timeout=30000
+        )
         self.search_url = "https://cryptocurrencyjobs.co"
 
-    def scrape(self) -> List[Job]:
-        """Scrape CryptocurrencyJobs.co"""
+    async def scrape(self) -> List[Job]:
+        """Scrape CryptocurrencyJobs.co - using H2 headings approach"""
         jobs = []
         try:
             logger.info(f"Scraping {self.source_name}...")
-            response = self.session.get(self.search_url, timeout=30)
-            response.raise_for_status()
+            content, _ = await self.get_page_content(self.search_url)
             
-            soup = BeautifulSoup(response.content, 'html.parser')
+            if not content:
+                return jobs
             
-            job_elements = soup.find_all(['article', 'div', 'li'], class_=re.compile(r'job|listing|card|post', re.I))
+            soup = BeautifulSoup(content, 'html.parser')
             
-            if not job_elements:
-                job_elements = soup.find_all('a', href=re.compile(r'/job/|/jobs/|/position/'))
+            # Search for H2 headings in main (job titles are H2)
+            main_elem = soup.find('main')
+            if not main_elem:
+                return jobs
             
-            for element in job_elements[:20]:
+            h2_elements = main_elem.find_all('h2')
+            
+            logger.info(f"Found {len(h2_elements)} H2 headings from {self.source_name}")
+            
+            for h2_elem in h2_elements[:30]:  # Limit to first 30
                 try:
-                    job = self.parse_job(element)
+                    # Get text content
+                    title_text = h2_elem.get_text(strip=True)
+                    
+                    # Filter: Skip if "Talent Collective" or "Subscribe"
+                    if not title_text or len(title_text) < 5:
+                        continue
+                    if 'talent collective' in title_text.lower() or 'subscribe' in title_text.lower():
+                        continue
+                    
+                    # Find parent <a> tag or closest ancestor
+                    link = h2_elem.find_parent('a')
+                    if not link:
+                        # Try finding a link near the H2 (sibling or parent's sibling)
+                        parent = h2_elem.parent
+                        if parent:
+                            link = parent.find('a')
+                    
+                    # Get URL
+                    url = self.base_url
+                    if link and link.get('href'):
+                        href = link['href']
+                        if not href.startswith('http'):
+                            url = f"{self.base_url}{href}"
+                        else:
+                            url = href
+                    
+                    # Create job from H2
+                    job = self.parse_job_from_h2(title_text, url)
                     if job:
                         jobs.append(job)
                 except Exception as e:
-                    logger.warning(f"Error parsing job element: {e}")
+                    logger.warning(f"Error parsing H2 element: {e}")
                     continue
                     
         except Exception as e:
             logger.error(f"Error scraping {self.source_name}: {e}")
         
         return jobs
+    
+    def parse_job_from_h2(self, title: str, url: str) -> Optional[Job]:
+        """Parse job from H2 title and URL"""
+        try:
+            if not title or len(title) < 5:
+                return None
+            
+            # Extract company (try to parse from title or use default)
+            company = "Unknown"
+            # Look for common patterns like "Title @ Company" or "Company - Title"
+            if '@' in title:
+                parts = title.split('@')
+                if len(parts) > 1:
+                    company = parts[-1].strip()
+                    title = parts[0].strip()
+            elif ' - ' in title:
+                parts = title.split(' - ', 1)
+                if len(parts) > 1:
+                    title = parts[0].strip()
+                    company = parts[1].strip()
+            
+            # Use title as description (limited)
+            description = title[:300]
+            
+            # Rank the job
+            priority, reason = JobRanker.rank_job(title, description)
+            
+            if priority == JobPriority.BLACKLISTED:
+                return None
+            
+            return Job(
+                title=title,
+                company=company,
+                url=url,
+                description=description[:300],
+                source=self.source_name,
+                priority=priority,
+                priority_reason=reason
+            )
+        except Exception as e:
+            logger.warning(f"Error parsing job from H2: {e}")
+            return None
 
     def parse_job(self, element, job_url: str = None) -> Optional[Job]:
         """Parse a CryptocurrencyJobs.co job element"""
@@ -397,6 +682,8 @@ class CryptocurrencyJobsScraper(JobScraper):
                 return None
             
             title = title_elem.get_text(strip=True)
+            if not title or len(title) < 5:
+                return None
             
             link = element.find('a', href=True)
             if link:
@@ -434,6 +721,148 @@ class CryptocurrencyJobsScraper(JobScraper):
             return None
 
 
+class TelegramScraper(JobScraper):
+    """Scraper for Telegram channels using web preview"""
+    
+    def __init__(self):
+        super().__init__(
+            "Telegram Channels",
+            "https://t.me",
+            job_list_selector='div.tgme_widget_message_wrap',
+            wait_timeout=30000
+        )
+        # List of Telegram channels to scrape
+        self.telegram_channels = [
+            "https://t.me/s/job_crypto_eu",
+            "https://t.me/s/web3hiring",
+            "https://t.me/s/degencryptojobs",
+            "https://t.me/s/cryptojobslist"
+        ]
+
+    async def scrape(self) -> List[Job]:
+        """Scrape all Telegram channels"""
+        all_jobs = []
+        
+        for channel_url in self.telegram_channels:
+            jobs = []
+            page = None
+            channel_name = channel_url.split('/')[-1]
+            try:
+                logger.info(f"Scraping Telegram channel: {channel_name}...")
+                # Wait for message container to load
+                page = await PlaywrightBrowserManager.create_page()
+                logger.info(f"Loading {channel_url}...")
+                
+                await page.goto(channel_url, wait_until='domcontentloaded', timeout=self.wait_timeout)
+                
+                # Wait for message containers to load
+                try:
+                    await page.wait_for_selector('div.tgme_widget_message_wrap', timeout=10000)
+                    logger.info(f"Telegram messages loaded for {channel_name}")
+                except PlaywrightTimeoutError:
+                    logger.warning(f"Message containers not found for {channel_name}, continuing anyway...")
+                
+                # Wait a bit more for content to render
+                await page.wait_for_timeout(2000)
+                
+                content = await page.content()
+                
+                if not content:
+                    continue
+                
+                soup = BeautifulSoup(content, 'html.parser')
+                
+                # Find message containers
+                message_wraps = soup.find_all('div', class_='tgme_widget_message_wrap')
+                
+                logger.info(f"Found {len(message_wraps)} messages from {channel_name}")
+                
+                # Get last 10 messages
+                for message_wrap in message_wraps[-10:]:
+                    try:
+                        job = self.parse_job(message_wrap, channel_name)
+                        if job:
+                            jobs.append(job)
+                    except Exception as e:
+                        logger.warning(f"Error parsing Telegram message: {e}")
+                        continue
+                
+                all_jobs.extend(jobs)
+                logger.info(f"Scraped {len(jobs)} jobs from {channel_name}")
+                        
+            except Exception as e:
+                logger.error(f"Error scraping Telegram channel {channel_name}: {e}")
+            finally:
+                if page:
+                    await page.close()
+        
+        return all_jobs
+
+    def parse_job(self, element, channel_name: str = None) -> Optional[Job]:
+        """Parse a Telegram message element"""
+        try:
+            # Extract message text
+            message_text_elem = element.find('div', class_='tgme_widget_message_text')
+            if not message_text_elem:
+                return None
+            
+            message_text = message_text_elem.get_text(strip=True)
+            if not message_text or len(message_text) < 10:
+                return None
+            
+            # Look for job keywords
+            text_lower = message_text.lower()
+            if not any(keyword in text_lower for keyword in ['hiring', 'role:', 'salary', 'position', 'job', 'looking for']):
+                return None
+            
+            # Extract title (first line or first sentence)
+            lines = message_text.split('\n')
+            title = lines[0].strip() if lines else message_text[:100].strip()
+            if len(title) > 150:
+                title = title[:150] + "..."
+            
+            # Extract URL from message date link
+            date_link = element.find('a', class_='tgme_widget_message_date')
+            if date_link and date_link.get('href'):
+                url = date_link['href']
+            else:
+                # Fallback: construct URL from channel
+                url = f"https://t.me/{channel_name}" if channel_name else "https://t.me/job_crypto_eu"
+            
+            # Extract company (try to find in text, or use channel name)
+            company = f"Telegram ({channel_name})" if channel_name else "Telegram Channel"
+            # Look for company mentions in common patterns
+            for line in lines[:3]:
+                if '@' in line or 'company:' in line.lower() or 'at ' in line.lower():
+                    # Try to extract company name
+                    parts = line.split('@')
+                    if len(parts) > 1:
+                        company = parts[1].split()[0] if parts[1].split() else company
+                    break
+            
+            # Use full message as description
+            description = message_text[:500]
+            
+            # Rank the job
+            priority, reason = JobRanker.rank_job(title, description)
+            
+            if priority == JobPriority.BLACKLISTED:
+                return None
+            
+            return Job(
+                title=title,
+                company=company,
+                url=url,
+                description=description[:300],
+                source=f"Telegram ({channel_name})" if channel_name else self.source_name,
+                priority=priority,
+                priority_reason=reason
+            )
+        except Exception as e:
+            logger.warning(f"Error parsing Telegram message: {e}")
+            return None
+
+
 class DiscordNotifier:
     """Send job summaries to Discord via webhook"""
     
@@ -449,63 +878,69 @@ class DiscordNotifier:
         # Sort jobs by priority
         sorted_jobs = sorted(jobs, key=lambda x: x.priority.value)
         
-        # Group by priority
-        perfect_matches = [j for j in sorted_jobs if j.priority == JobPriority.PERFECT_MATCH]
-        good_matches = [j for j in sorted_jobs if j.priority == JobPriority.GOOD_MATCH]
-        weak_matches = [j for j in sorted_jobs if j.priority == JobPriority.WEAK_MATCH]
+        # Separate Telegram jobs from other sources
+        telegram_jobs = [j for j in sorted_jobs if 'Telegram' in j.source]
+        other_jobs = [j for j in sorted_jobs if 'Telegram' not in j.source]
         
-        # Build embed
+        # Group other jobs by priority
+        perfect_matches = [j for j in other_jobs if j.priority == JobPriority.PERFECT_MATCH]
+        good_matches = [j for j in other_jobs if j.priority == JobPriority.GOOD_MATCH]
+        weak_matches = [j for j in other_jobs if j.priority == JobPriority.WEAK_MATCH]
+        
+        # Build embeds with cleaner layout
         embeds = []
         
-        # Perfect Matches
-        if perfect_matches:
+        # Embed 1: Top Matches (Perfect & Good combined)
+        top_matches = perfect_matches + good_matches
+        if top_matches:
             embed = {
-                "title": "🥇 Perfect Matches",
-                "color": 3066993,  # Green
+                "title": "🏆 Top Matches",
+                "color": 15844367,  # Gold
                 "fields": []
             }
-            for job in perfect_matches[:10]:  # Limit to 10
+            # Limit to 10 to avoid Discord message length limits
+            for job in top_matches[:10]:
+                priority_emoji = "🥇" if job.priority == JobPriority.PERFECT_MATCH else "🥈"
                 embed["fields"].append({
-                    "name": f"{job.title} @ {job.company}",
+                    "name": f"{priority_emoji} **{job.title}** @ {job.company}",
                     "value": f"{job.priority_reason}\n[View Job]({job.url})\n*{job.source}*",
                     "inline": False
                 })
             embeds.append(embed)
         
-        # Good Matches
-        if good_matches:
+        # Embed 2: Telegram Finds
+        if telegram_jobs:
             embed = {
-                "title": "🥈 Good Matches",
+                "title": "📱 Telegram Finds",
                 "color": 3447003,  # Blue
                 "fields": []
             }
-            for job in good_matches[:10]:
+            # Limit to 10 to avoid Discord message length limits
+            for job in telegram_jobs[:10]:
                 embed["fields"].append({
-                    "name": f"{job.title} @ {job.company}",
-                    "value": f"{job.priority_reason}\n[View Job]({job.url})\n*{job.source}*",
+                    "name": f"**{job.title}**",
+                    "value": f"[View Message]({job.url})\n*{job.source}*",
                     "inline": False
                 })
             embeds.append(embed)
         
-        # Weak Matches (only if there are no perfect/good matches)
-        if weak_matches and not perfect_matches and not good_matches:
-            embed = {
-                "title": "🥉 Weak Matches",
-                "color": 15158332,  # Red
-                "fields": []
-            }
-            for job in weak_matches[:5]:
-                embed["fields"].append({
-                    "name": f"{job.title} @ {job.company}",
-                    "value": f"{job.priority_reason}\n[View Job]({job.url})\n*{job.source}*",
-                    "inline": False
-                })
-            embeds.append(embed)
+        # Build weak matches as text list at the bottom (to save space)
+        weak_matches_text = ""
+        if weak_matches:
+            weak_matches_text = "\n\n**🔍 Other Potential Roles (Weak Match):**\n"
+            # Limit to 10 to avoid Discord message length limits
+            for job in weak_matches[:10]:
+                weak_matches_text += f"• {job.title} @ {job.company} - [View Job]({job.url})\n"
         
         # Main message
+        content_text = f"📊 **Daily Job Scraper Report** - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        content_text += f"Found {len(perfect_matches)} perfect matches, {len(good_matches)} good matches, {len(weak_matches)} weak matches"
+        if telegram_jobs:
+            content_text += f", {len(telegram_jobs)} Telegram finds"
+        content_text += weak_matches_text
+        
         payload = {
-            "content": f"📊 **Daily Job Scraper Report** - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                      f"Found {len(perfect_matches)} perfect matches, {len(good_matches)} good matches, {len(weak_matches)} weak matches",
+            "content": content_text,
             "embeds": embeds
         }
         
@@ -517,18 +952,19 @@ class DiscordNotifier:
             logger.error(f"Error sending to Discord: {e}")
 
 
-def scrape_all_jobs() -> List[Job]:
+async def scrape_all_jobs() -> List[Job]:
     """Scrape all job sources"""
     all_jobs = []
     scrapers = [
         Web3CareerScraper(),
         CryptoJobsListScraper(),
-        CryptocurrencyJobsScraper()
+        CryptocurrencyJobsScraper(),
+        TelegramScraper()
     ]
     
     for scraper in scrapers:
         try:
-            jobs = scraper.scrape()
+            jobs = await scraper.scrape()
             all_jobs.extend(jobs)
             logger.info(f"Scraped {len(jobs)} jobs from {scraper.source_name}")
         except Exception as e:
@@ -538,48 +974,102 @@ def scrape_all_jobs() -> List[Job]:
     return all_jobs
 
 
-def run_daily_scrape():
-    """Main function to run daily scrape"""
+def load_seen_jobs() -> set:
+    """Load seen job URLs from file"""
+    seen_jobs_file = 'seen_jobs.json'
+    try:
+        if os.path.exists(seen_jobs_file):
+            with open(seen_jobs_file, 'r') as f:
+                seen_urls = json.load(f)
+                logger.info(f"Loaded {len(seen_urls)} seen job URLs from memory")
+                return set(seen_urls)
+    except Exception as e:
+        logger.warning(f"Error loading seen_jobs.json: {e}")
+    return set()
+
+
+def save_seen_jobs(seen_urls: set):
+    """Save seen job URLs to file"""
+    seen_jobs_file = 'seen_jobs.json'
+    try:
+        with open(seen_jobs_file, 'w') as f:
+            json.dump(list(seen_urls), f, indent=2)
+        logger.info(f"Saved {len(seen_urls)} job URLs to memory")
+    except Exception as e:
+        logger.error(f"Error saving seen_jobs.json: {e}")
+
+
+async def run_daily_scrape_async():
+    """Main async function to run daily scrape"""
     logger.info("=" * 60)
     logger.info("Starting daily job scrape...")
     logger.info("=" * 60)
     
-    # Scrape all jobs
-    jobs = scrape_all_jobs()
+    # Load seen jobs
+    seen_urls = load_seen_jobs()
     
-    logger.info(f"Total jobs found: {len(jobs)}")
-    
-    # Filter out blacklisted jobs (already done in parsers, but double-check)
-    filtered_jobs = [j for j in jobs if j.priority != JobPriority.BLACKLISTED]
-    
-    # Send to Discord if webhook is configured
-    # Default webhook URL (can be overridden by environment variable)
-    default_webhook = "REPLACED_WEBHOOK_URL"
-    webhook_url = os.getenv('DISCORD_WEBHOOK_URL', default_webhook)
-    
-    if webhook_url:
-        try:
-            notifier = DiscordNotifier(webhook_url)
-            notifier.send_summary(filtered_jobs)
-        except Exception as e:
-            logger.error(f"Error sending to Discord: {e}")
-            # Fallback to console output
-            for job in sorted(filtered_jobs, key=lambda x: x.priority.value):
+    try:
+        # Scrape all jobs
+        jobs = await scrape_all_jobs()
+        
+        logger.info(f"Total jobs found: {len(jobs)}")
+        
+        # Filter out blacklisted jobs (already done in parsers, but double-check)
+        filtered_jobs = [j for j in jobs if j.priority != JobPriority.BLACKLISTED]
+        
+        # Deduplicate: filter out jobs we've already seen
+        new_jobs = []
+        skipped_count = 0
+        for job in filtered_jobs:
+            if job.url in seen_urls:
+                skipped_count += 1
+                continue
+            new_jobs.append(job)
+            seen_urls.add(job.url)
+        
+        if skipped_count > 0:
+            logger.info(f"Skipped {skipped_count} duplicate jobs")
+        
+        logger.info(f"New jobs to send: {len(new_jobs)}")
+        
+        # Send to Discord if webhook is configured
+        # Default webhook URL (can be overridden by environment variable)
+        default_webhook = "REPLACED_WEBHOOK_URL"
+        webhook_url = os.getenv('DISCORD_WEBHOOK_URL', default_webhook)
+        
+        if webhook_url:
+            try:
+                notifier = DiscordNotifier(webhook_url)
+                notifier.send_summary(new_jobs)
+            except Exception as e:
+                logger.error(f"Error sending to Discord: {e}")
+                # Fallback to console output
+                for job in sorted(new_jobs, key=lambda x: x.priority.value):
+                    print(f"\n[{job.priority.name}] {job.title} @ {job.company}")
+                    print(f"  Reason: {job.priority_reason}")
+                    print(f"  URL: {job.url}")
+                    print(f"  Source: {job.source}")
+        else:
+            logger.warning("DISCORD_WEBHOOK_URL not set. Skipping Discord notification.")
+            # Print summary to console
+            for job in sorted(new_jobs, key=lambda x: x.priority.value):
                 print(f"\n[{job.priority.name}] {job.title} @ {job.company}")
                 print(f"  Reason: {job.priority_reason}")
                 print(f"  URL: {job.url}")
                 print(f"  Source: {job.source}")
-    else:
-        logger.warning("DISCORD_WEBHOOK_URL not set. Skipping Discord notification.")
-        # Print summary to console
-        for job in sorted(filtered_jobs, key=lambda x: x.priority.value):
-            print(f"\n[{job.priority.name}] {job.title} @ {job.company}")
-            print(f"  Reason: {job.priority_reason}")
-            print(f"  URL: {job.url}")
-            print(f"  Source: {job.source}")
-    
-    logger.info("Daily scrape completed!")
-    logger.info("=" * 60)
+        
+        logger.info("Daily scrape completed!")
+        logger.info("=" * 60)
+    finally:
+        # Save seen jobs to file (even if script crashes)
+        save_seen_jobs(seen_urls)
+        # Close browser after scraping
+        await PlaywrightBrowserManager.close_browser()
+
+
+def run_daily_scrape():
+    """Wrapper to run async scrape"""
+    asyncio.run(run_daily_scrape_async())
 
 
 def main():
@@ -600,8 +1090,9 @@ def main():
             time.sleep(60)  # Check every minute
     except KeyboardInterrupt:
         logger.info("Job scraper stopped by user")
+        # Close browser on exit
+        asyncio.run(PlaywrightBrowserManager.close_browser())
 
 
 if __name__ == "__main__":
     main()
-
