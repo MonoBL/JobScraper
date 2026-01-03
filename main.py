@@ -1100,9 +1100,8 @@ async def run_daily_scrape_async():
         # Only send to Discord if there are new jobs
         if new_jobs:
             # Send to Discord if webhook is configured
-            # Default webhook URL (can be overridden by environment variable)
-            default_webhook = "REPLACED_WEBHOOK_URL"
-            webhook_url = os.getenv('DISCORD_WEBHOOK_URL', default_webhook)
+            # SECURITY: Webhook URL must be set via environment variable or .env file
+            webhook_url = os.getenv('DISCORD_WEBHOOK_URL')
             
             if webhook_url:
                 try:
