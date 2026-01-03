@@ -999,16 +999,76 @@ def save_seen_jobs(seen_urls: set):
         logger.error(f"Error saving seen_jobs.json: {e}")
 
 
+def acquire_lock() -> bool:
+    """Acquire a lock file to prevent multiple instances from running (atomic operation)"""
+    lock_file = 'job_scraper.lock'
+    try:
+        # Try to create lock file atomically (exclusive creation)
+        # This prevents race conditions between checking and creating
+        try:
+            # Use O_CREAT | O_EXCL flags for atomic creation (Unix)
+            # On Windows, this will raise FileExistsError if file exists
+            fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, 'w') as f:
+                f.write(str(os.getpid()))
+            logger.info("Lock acquired successfully")
+            return True
+        except (OSError, FileExistsError):
+            # Lock file already exists
+            if os.path.exists(lock_file):
+                # Check if lock is stale (older than 15 minutes)
+                try:
+                    lock_age = time.time() - os.path.getmtime(lock_file)
+                    if lock_age > 900:  # 15 minutes
+                        logger.warning(f"Removing stale lock file (age: {lock_age:.0f}s)")
+                        os.remove(lock_file)
+                        # Try again after removing stale lock
+                        try:
+                            fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                            with os.fdopen(fd, 'w') as f:
+                                f.write(str(os.getpid()))
+                            logger.info("Lock acquired after removing stale lock")
+                            return True
+                        except (OSError, FileExistsError):
+                            logger.warning("Another instance acquired lock. Exiting.")
+                            return False
+                    else:
+                        logger.warning(f"Another instance is already running (lock age: {lock_age:.0f}s). Exiting.")
+                        return False
+                except Exception as e:
+                    logger.warning(f"Error checking lock file: {e}. Exiting to be safe.")
+                    return False
+            return False
+    except Exception as e:
+        logger.error(f"Error acquiring lock: {e}")
+        return False
+
+
+def release_lock():
+    """Release the lock file"""
+    lock_file = 'job_scraper.lock'
+    try:
+        if os.path.exists(lock_file):
+            os.remove(lock_file)
+    except Exception as e:
+        logger.warning(f"Error releasing lock: {e}")
+
+
 async def run_daily_scrape_async():
     """Main async function to run daily scrape"""
-    logger.info("=" * 60)
-    logger.info("Starting daily job scrape...")
-    logger.info("=" * 60)
-    
-    # Load seen jobs
-    seen_urls = load_seen_jobs()
+    # Check for lock file to prevent multiple instances
+    if not acquire_lock():
+        logger.warning("Another instance is running. Exiting to prevent duplicates.")
+        return
     
     try:
+        logger.info("=" * 60)
+        logger.info("Starting daily job scrape...")
+        logger.info("=" * 60)
+        
+        # Load seen jobs
+        seen_urls = load_seen_jobs()
+        
         # Scrape all jobs
         jobs = await scrape_all_jobs()
         
@@ -1032,39 +1092,48 @@ async def run_daily_scrape_async():
         
         logger.info(f"New jobs to send: {len(new_jobs)}")
         
-        # Send to Discord if webhook is configured
-        # Default webhook URL (can be overridden by environment variable)
-        default_webhook = "REPLACED_WEBHOOK_URL"
-        webhook_url = os.getenv('DISCORD_WEBHOOK_URL', default_webhook)
+        # Save seen jobs IMMEDIATELY after deduplication (before sending to Discord)
+        # This prevents race condition where multiple instances send same jobs
+        # Save even if no new jobs (to update the file timestamp)
+        save_seen_jobs(seen_urls)
         
-        if webhook_url:
-            try:
-                notifier = DiscordNotifier(webhook_url)
-                notifier.send_summary(new_jobs)
-            except Exception as e:
-                logger.error(f"Error sending to Discord: {e}")
-                # Fallback to console output
+        # Only send to Discord if there are new jobs
+        if new_jobs:
+            # Send to Discord if webhook is configured
+            # Default webhook URL (can be overridden by environment variable)
+            default_webhook = "REPLACED_WEBHOOK_URL"
+            webhook_url = os.getenv('DISCORD_WEBHOOK_URL', default_webhook)
+            
+            if webhook_url:
+                try:
+                    notifier = DiscordNotifier(webhook_url)
+                    notifier.send_summary(new_jobs)
+                except Exception as e:
+                    logger.error(f"Error sending to Discord: {e}")
+                    # Fallback to console output
+                    for job in sorted(new_jobs, key=lambda x: x.priority.value):
+                        print(f"\n[{job.priority.name}] {job.title} @ {job.company}")
+                        print(f"  Reason: {job.priority_reason}")
+                        print(f"  URL: {job.url}")
+                        print(f"  Source: {job.source}")
+            else:
+                logger.warning("DISCORD_WEBHOOK_URL not set. Skipping Discord notification.")
+                # Print summary to console
                 for job in sorted(new_jobs, key=lambda x: x.priority.value):
                     print(f"\n[{job.priority.name}] {job.title} @ {job.company}")
                     print(f"  Reason: {job.priority_reason}")
                     print(f"  URL: {job.url}")
                     print(f"  Source: {job.source}")
         else:
-            logger.warning("DISCORD_WEBHOOK_URL not set. Skipping Discord notification.")
-            # Print summary to console
-            for job in sorted(new_jobs, key=lambda x: x.priority.value):
-                print(f"\n[{job.priority.name}] {job.title} @ {job.company}")
-                print(f"  Reason: {job.priority_reason}")
-                print(f"  URL: {job.url}")
-                print(f"  Source: {job.source}")
+            logger.info("No new jobs to send to Discord")
         
         logger.info("Daily scrape completed!")
         logger.info("=" * 60)
     finally:
-        # Save seen jobs to file (even if script crashes)
-        save_seen_jobs(seen_urls)
         # Close browser after scraping
         await PlaywrightBrowserManager.close_browser()
+        # Release lock file
+        release_lock()
 
 
 def run_daily_scrape():
@@ -1074,24 +1143,33 @@ def run_daily_scrape():
 
 def main():
     """Main entry point"""
-    # Run immediately on start (for testing)
-    run_daily_scrape()
+    # Check for lock at main entry point (prevent multiple script instances)
+    if not acquire_lock():
+        logger.error("Another instance is already running. Exiting.")
+        return
     
-    # Schedule daily runs at 9:00 AM
-    schedule.every().day.at("09:00").do(run_daily_scrape)
-    
-    logger.info("Job scraper started. Will run daily at 09:00 AM")
-    logger.info("Press Ctrl+C to stop")
-    
-    # Keep the script running
     try:
-        while True:
-            schedule.run_pending()
-            time.sleep(60)  # Check every minute
-    except KeyboardInterrupt:
-        logger.info("Job scraper stopped by user")
-        # Close browser on exit
-        asyncio.run(PlaywrightBrowserManager.close_browser())
+        # Run immediately on start (for testing)
+        run_daily_scrape()
+        
+        # Schedule daily runs at 9:00 AM
+        schedule.every().day.at("09:00").do(run_daily_scrape)
+        
+        logger.info("Job scraper started. Will run daily at 09:00 AM")
+        logger.info("Press Ctrl+C to stop")
+        
+        # Keep the script running
+        try:
+            while True:
+                schedule.run_pending()
+                time.sleep(60)  # Check every minute
+        except KeyboardInterrupt:
+            logger.info("Job scraper stopped by user")
+            # Close browser on exit
+            asyncio.run(PlaywrightBrowserManager.close_browser())
+    finally:
+        # Release lock on exit
+        release_lock()
 
 
 if __name__ == "__main__":
