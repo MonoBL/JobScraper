@@ -781,18 +781,22 @@ class TelegramScraper(JobScraper):
                 
                 logger.info(f"Found {len(message_wraps)} messages from {channel_name}")
                 
-                # Get last 10 messages
-                for message_wrap in message_wraps[-10:]:
+                # Get last 15 messages (increased from 10 for better coverage)
+                for message_wrap in message_wraps[-15:]:
                     try:
                         job = self.parse_job(message_wrap, channel_name)
                         if job:
                             jobs.append(job)
+                            logger.debug(f"Parsed Telegram job: {job.title[:50]}...")
                     except Exception as e:
                         logger.warning(f"Error parsing Telegram message: {e}")
                         continue
                 
                 all_jobs.extend(jobs)
-                logger.info(f"Scraped {len(jobs)} jobs from {channel_name}")
+                if len(jobs) > 0:
+                    logger.info(f"Scraped {len(jobs)} jobs from {channel_name}")
+                else:
+                    logger.info(f"No jobs found in {channel_name} (checked {len(message_wraps)} messages)")
                         
             except Exception as e:
                 logger.error(f"Error scraping Telegram channel {channel_name}: {e}")
@@ -814,10 +818,19 @@ class TelegramScraper(JobScraper):
             if not message_text or len(message_text) < 10:
                 return None
             
-            # Look for job keywords
+            # Look for job keywords (more flexible matching)
             text_lower = message_text.lower()
-            if not any(keyword in text_lower for keyword in ['hiring', 'role:', 'salary', 'position', 'job', 'looking for']):
-                return None
+            job_keywords = [
+                'hiring', 'role:', 'salary', 'position', 'job', 'looking for',
+                'we\'re hiring', 'we are hiring', 'join us', 'opportunity',
+                'open position', 'vacancy', 'recruiting', 'apply now',
+                'remote', 'full-time', 'part-time', 'contract', 'freelance'
+            ]
+            # Check if message contains job-related keywords
+            if not any(keyword in text_lower for keyword in job_keywords):
+                # Also check if message is long enough and contains common job-related terms
+                if len(message_text) < 50 or not any(term in text_lower for term in ['engineer', 'developer', 'manager', 'analyst', 'support', 'devops', 'blockchain', 'crypto', 'web3']):
+                    return None
             
             # Extract title (first line or first sentence)
             lines = message_text.split('\n')
@@ -994,21 +1007,49 @@ def load_seen_jobs() -> set:
 
 
 def save_seen_jobs(seen_urls: set):
-    """Save seen job URLs to file"""
+    """Save seen job URLs to file (atomic operation to prevent race conditions)"""
     seen_jobs_file = 'seen_jobs.json'
-    try:
-        with open(seen_jobs_file, 'w') as f:
-            json.dump(list(seen_urls), f, indent=2)
-        logger.info(f"Saved {len(seen_urls)} job URLs to memory")
-    except Exception as e:
-        logger.error(f"Error saving seen_jobs.json: {e}")
+    temp_file = 'seen_jobs.json.tmp'
+    max_retries = 3
+    
+    for attempt in range(max_retries):
+        try:
+            # Write to temp file first, then rename (atomic on Unix)
+            with open(temp_file, 'w') as f:
+                json.dump(list(seen_urls), f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())  # Force write to disk
+            
+            # Atomic rename (Unix) or copy (Windows)
+            if os.name == 'nt':  # Windows
+                if os.path.exists(seen_jobs_file):
+                    os.remove(seen_jobs_file)
+                os.rename(temp_file, seen_jobs_file)
+            else:  # Unix/Linux/Mac
+                os.rename(temp_file, seen_jobs_file)
+            
+            logger.info(f"Saved {len(seen_urls)} job URLs to memory")
+            return
+        except Exception as e:
+            logger.warning(f"Error saving seen_jobs.json (attempt {attempt + 1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(0.2)  # Wait before retry
+            else:
+                logger.error(f"Failed to save seen_jobs.json after {max_retries} attempts")
+        finally:
+            # Clean up temp file if it exists
+            try:
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+            except:
+                pass
 
 
 def acquire_lock() -> bool:
     """Acquire a lock file to prevent multiple instances from running (atomic operation)"""
     lock_file = 'job_scraper.lock'
-    max_retries = 3
-    retry_delay = 0.2  # 200ms between retries
+    max_retries = 5  # Increased retries
+    retry_delay = 0.5  # 500ms between retries (increased)
     
     for attempt in range(max_retries):
         try:
@@ -1089,8 +1130,11 @@ def release_lock():
 async def run_daily_scrape_async():
     """Main async function to run daily scrape"""
     # Check for lock file to prevent multiple instances
-    # Add a small random delay to prevent race conditions when schedule triggers multiple times
-    await asyncio.sleep(random.uniform(0.1, 0.5))  # Random delay 100-500ms
+    # Add a longer random delay to prevent race conditions when schedule triggers multiple times
+    # This gives time for any previous instance to finish and release the lock
+    delay = random.uniform(1.0, 3.0)  # Random delay 1-3 seconds
+    logger.info(f"Waiting {delay:.2f}s before acquiring lock...")
+    await asyncio.sleep(delay)
     
     if not acquire_lock():
         logger.warning("Another instance is running. Exiting to prevent duplicates.")
