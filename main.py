@@ -5,11 +5,15 @@ Scrapes Web3/Crypto job boards and ranks them based on Nuno's profile.
 Uses Playwright for JavaScript-rendered content.
 """
 
+# Bot version - update this when making significant changes
+BOT_VERSION = "v2.0"
+
 import os
 import re
 import json
 import logging
 import asyncio
+import random
 from datetime import datetime
 from typing import List, Dict, Optional
 from dataclasses import dataclass, asdict
@@ -932,8 +936,9 @@ class DiscordNotifier:
             for job in weak_matches[:10]:
                 weak_matches_text += f"• {job.title} @ {job.company} - [View Job]({job.url})\n"
         
-        # Main message
-        content_text = f"📊 **Daily Job Scraper Report** - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        # Main message with version number
+        content_text = f"🤖 **Bot Version: {BOT_VERSION}**\n"
+        content_text += f"📊 **Daily Job Scraper Report** - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
         content_text += f"Found {len(perfect_matches)} perfect matches, {len(good_matches)} good matches, {len(weak_matches)} weak matches"
         if telegram_jobs:
             content_text += f", {len(telegram_jobs)} Telegram finds"
@@ -1002,46 +1007,73 @@ def save_seen_jobs(seen_urls: set):
 def acquire_lock() -> bool:
     """Acquire a lock file to prevent multiple instances from running (atomic operation)"""
     lock_file = 'job_scraper.lock'
-    try:
-        # Try to create lock file atomically (exclusive creation)
-        # This prevents race conditions between checking and creating
+    max_retries = 3
+    retry_delay = 0.2  # 200ms between retries
+    
+    for attempt in range(max_retries):
         try:
-            # Use O_CREAT | O_EXCL flags for atomic creation (Unix)
-            # On Windows, this will raise FileExistsError if file exists
-            fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            with os.fdopen(fd, 'w') as f:
-                f.write(str(os.getpid()))
-            logger.info("Lock acquired successfully")
-            return True
-        except (OSError, FileExistsError):
-            # Lock file already exists
-            if os.path.exists(lock_file):
-                # Check if lock is stale (older than 15 minutes)
-                try:
-                    lock_age = time.time() - os.path.getmtime(lock_file)
-                    if lock_age > 900:  # 15 minutes
-                        logger.warning(f"Removing stale lock file (age: {lock_age:.0f}s)")
-                        os.remove(lock_file)
-                        # Try again after removing stale lock
-                        try:
-                            fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                            with os.fdopen(fd, 'w') as f:
-                                f.write(str(os.getpid()))
-                            logger.info("Lock acquired after removing stale lock")
-                            return True
-                        except (OSError, FileExistsError):
-                            logger.warning("Another instance acquired lock. Exiting.")
-                            return False
-                    else:
-                        logger.warning(f"Another instance is already running (lock age: {lock_age:.0f}s). Exiting.")
+            # Try to create lock file atomically (exclusive creation)
+            # This prevents race conditions between checking and creating
+            try:
+                # Use O_CREAT | O_EXCL flags for atomic creation (Unix)
+                # On Windows, this will raise FileExistsError if file exists
+                fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                with os.fdopen(fd, 'w') as f:
+                    f.write(f"{os.getpid()}\n{time.time()}\n{BOT_VERSION}")
+                logger.info("Lock acquired successfully")
+                return True
+            except (OSError, FileExistsError):
+                # Lock file already exists
+                if os.path.exists(lock_file):
+                    # Check if lock is stale (older than 10 minutes)
+                    try:
+                        lock_age = time.time() - os.path.getmtime(lock_file)
+                        if lock_age > 600:  # 10 minutes (reduced from 15)
+                            logger.warning(f"Removing stale lock file (age: {lock_age:.0f}s)")
+                            try:
+                                os.remove(lock_file)
+                            except:
+                                pass  # Another process might have removed it
+                            # Wait a bit before retrying
+                            if attempt < max_retries - 1:
+                                time.sleep(retry_delay)
+                                continue
+                        else:
+                            # Lock is active, check if it's the same process
+                            try:
+                                with open(lock_file, 'r') as f:
+                                    lock_pid = f.readline().strip()
+                                    if lock_pid == str(os.getpid()):
+                                        logger.warning("Lock file exists but belongs to this process. Reusing.")
+                                        return True
+                            except:
+                                pass
+                            
+                            if attempt < max_retries - 1:
+                                time.sleep(retry_delay)
+                                continue
+                            else:
+                                logger.warning(f"Another instance is already running (lock age: {lock_age:.0f}s). Exiting.")
+                                return False
+                    except Exception as e:
+                        logger.warning(f"Error checking lock file: {e}. Retrying...")
+                        if attempt < max_retries - 1:
+                            time.sleep(retry_delay)
+                            continue
                         return False
-                except Exception as e:
-                    logger.warning(f"Error checking lock file: {e}. Exiting to be safe.")
+                else:
+                    # File doesn't exist but we got FileExistsError - race condition
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        continue
                     return False
-            return False
-    except Exception as e:
-        logger.error(f"Error acquiring lock: {e}")
-        return False
+        except Exception as e:
+            logger.error(f"Error acquiring lock (attempt {attempt + 1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+                continue
+    
+    return False
 
 
 def release_lock():
@@ -1057,6 +1089,9 @@ def release_lock():
 async def run_daily_scrape_async():
     """Main async function to run daily scrape"""
     # Check for lock file to prevent multiple instances
+    # Add a small random delay to prevent race conditions when schedule triggers multiple times
+    await asyncio.sleep(random.uniform(0.1, 0.5))  # Random delay 100-500ms
+    
     if not acquire_lock():
         logger.warning("Another instance is running. Exiting to prevent duplicates.")
         return
@@ -1142,10 +1177,9 @@ def run_daily_scrape():
 
 def main():
     """Main entry point"""
-    # Check for lock at main entry point (prevent multiple script instances)
-    if not acquire_lock():
-        logger.error("Another instance is already running. Exiting.")
-        return
+    # Don't acquire lock here - let each scrape run acquire its own lock
+    # This prevents the main process from holding the lock while scheduler runs
+    logger.info(f"Job Scraper Bot {BOT_VERSION} starting...")
     
     try:
         # Run immediately on start (for testing)
@@ -1166,9 +1200,9 @@ def main():
             logger.info("Job scraper stopped by user")
             # Close browser on exit
             asyncio.run(PlaywrightBrowserManager.close_browser())
-    finally:
-        # Release lock on exit
-        release_lock()
+    except Exception as e:
+        logger.error(f"Fatal error in main: {e}")
+        raise
 
 
 if __name__ == "__main__":
