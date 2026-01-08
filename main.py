@@ -1045,9 +1045,49 @@ def save_seen_jobs(seen_urls: set):
                 pass
 
 
+def get_lock_file_path() -> str:
+    """Get absolute path to lock file (based on script directory)"""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(script_dir, 'job_scraper.lock')
+
+
+def kill_existing_instances():
+    """Kill any existing instances of this script (except current process)"""
+    current_pid = os.getpid()
+    script_name = os.path.basename(__file__)
+    
+    try:
+        import subprocess
+        # Find all Python processes running main.py
+        result = subprocess.run(
+            ['pgrep', '-f', f'python.*{script_name}'],
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode == 0:
+            pids = [pid.strip() for pid in result.stdout.strip().split('\n') if pid.strip()]
+            killed_count = 0
+            for pid in pids:
+                try:
+                    pid_int = int(pid)
+                    if pid_int != current_pid:
+                        os.kill(pid_int, 15)  # SIGTERM
+                        killed_count += 1
+                        logger.info(f"Killed existing instance (PID: {pid_int})")
+                except (ValueError, ProcessLookupError, PermissionError):
+                    pass  # Process already dead or permission denied
+            
+            if killed_count > 0:
+                logger.info(f"Killed {killed_count} existing instance(s)")
+                time.sleep(2)  # Give processes time to exit
+    except Exception as e:
+        logger.warning(f"Error killing existing instances: {e}")
+
+
 def acquire_lock() -> bool:
     """Acquire a lock file to prevent multiple instances from running (atomic operation)"""
-    lock_file = 'job_scraper.lock'
+    lock_file = get_lock_file_path()
     max_retries = 5  # Increased retries
     retry_delay = 0.5  # 500ms between retries (increased)
     
@@ -1119,7 +1159,7 @@ def acquire_lock() -> bool:
 
 def release_lock():
     """Release the lock file"""
-    lock_file = 'job_scraper.lock'
+    lock_file = get_lock_file_path()
     try:
         if os.path.exists(lock_file):
             os.remove(lock_file)
@@ -1221,6 +1261,9 @@ def run_daily_scrape():
 
 def main():
     """Main entry point"""
+    # Kill any existing instances first (prevents duplicates from manual starts)
+    kill_existing_instances()
+    
     # Don't acquire lock here - let each scrape run acquire its own lock
     # This prevents the main process from holding the lock while scheduler runs
     logger.info(f"Job Scraper Bot {BOT_VERSION} starting...")
