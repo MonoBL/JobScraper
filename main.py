@@ -253,7 +253,7 @@ class PlaywrightBrowserManager:
 
 
 class JobScraper:
-    """Base scraper class using Playwright"""
+    """Base scraper class using Playwright with advanced features"""
     
     def __init__(self, source_name: str, base_url: str, job_list_selector: str = None, wait_timeout: int = 30000):
         self.source_name = source_name
@@ -261,6 +261,8 @@ class JobScraper:
         self.search_url = base_url
         self.job_list_selector = job_list_selector  # Selector to wait for job list to load
         self.wait_timeout = wait_timeout  # Timeout in milliseconds
+        self.max_pages = 3  # Maximum pages to scrape (for pagination)
+        self.scroll_delay = 2000  # Delay between scrolls (ms)
 
     async def scrape(self) -> List[Job]:
         """Scrape jobs from the source. Override in subclasses."""
@@ -270,8 +272,198 @@ class JobScraper:
         """Parse a job element. Override in subclasses."""
         raise NotImplementedError
     
-    async def get_page_content(self, url: str, take_screenshot: bool = False, screenshot_path: str = None) -> tuple[Optional[str], Optional[Page]]:
-        """Get page content after JavaScript rendering
+    async def handle_infinite_scroll(self, page: Page, max_scrolls: int = 3) -> None:
+        """Handle infinite scroll by scrolling down and waiting for new content"""
+        try:
+            last_height = await page.evaluate("document.body.scrollHeight")
+            scrolls = 0
+            
+            while scrolls < max_scrolls:
+                # Scroll to bottom
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await page.wait_for_timeout(self.scroll_delay)
+                
+                # Check if new content loaded
+                new_height = await page.evaluate("document.body.scrollHeight")
+                if new_height == last_height:
+                    break  # No new content
+                
+                last_height = new_height
+                scrolls += 1
+                logger.debug(f"Scrolled {scrolls} times on {self.source_name}")
+        except Exception as e:
+            logger.warning(f"Error handling infinite scroll on {self.source_name}: {e}")
+    
+    async def click_load_more(self, page: Page, button_selector: str = None, max_clicks: int = 5) -> int:
+        """Click 'Load More' button if it exists. Returns number of clicks."""
+        clicks = 0
+        try:
+            for _ in range(max_clicks):
+                # Try multiple common selectors for "Load More" buttons
+                selectors = []
+                if button_selector:
+                    selectors.append(button_selector)
+                selectors.extend([
+                    'button:has-text("Load More")',
+                    'button:has-text("Show More")',
+                    'a:has-text("Load More")',
+                    '[class*="load-more"]',
+                    '[class*="show-more"]',
+                    '[id*="load-more"]',
+                    'button[aria-label*="more"]',
+                ])
+                
+                clicked = False
+                for selector in selectors:
+                    try:
+                        button = await page.query_selector(selector)
+                        if button:
+                            is_visible = await button.is_visible()
+                            if is_visible:
+                                await button.click()
+                                await page.wait_for_timeout(2000)  # Wait for content to load
+                                clicks += 1
+                                clicked = True
+                                logger.debug(f"Clicked 'Load More' button on {self.source_name} (click {clicks})")
+                                break
+                    except Exception:
+                        continue
+                
+                if not clicked:
+                    break  # No more buttons to click
+        except Exception as e:
+            logger.warning(f"Error clicking load more on {self.source_name}: {e}")
+        
+        return clicks
+    
+    async def handle_infinite_scroll(self, page: Page, max_scrolls: int = 3) -> None:
+        """Handle infinite scroll by scrolling down and waiting for new content"""
+        try:
+            last_height = await page.evaluate("document.body.scrollHeight")
+            scrolls = 0
+            
+            while scrolls < max_scrolls:
+                # Scroll to bottom
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await page.wait_for_timeout(self.scroll_delay)
+                
+                # Check if new content loaded
+                new_height = await page.evaluate("document.body.scrollHeight")
+                if new_height == last_height:
+                    break  # No new content
+                
+                last_height = new_height
+                scrolls += 1
+                logger.debug(f"Scrolled {scrolls} times on {self.source_name}")
+        except Exception as e:
+            logger.warning(f"Error handling infinite scroll on {self.source_name}: {e}")
+    
+    async def click_load_more(self, page: Page, button_selector: str, max_clicks: int = 5) -> int:
+        """Click 'Load More' button if it exists. Returns number of clicks."""
+        clicks = 0
+        try:
+            for _ in range(max_clicks):
+                # Try multiple common selectors for "Load More" buttons
+                selectors = [
+                    button_selector,
+                    'button:has-text("Load More")',
+                    'button:has-text("Show More")',
+                    'a:has-text("Load More")',
+                    '[class*="load-more"]',
+                    '[class*="show-more"]',
+                    '[id*="load-more"]',
+                ]
+                
+                clicked = False
+                for selector in selectors:
+                    try:
+                        button = await page.query_selector(selector)
+                        if button:
+                            is_visible = await button.is_visible()
+                            if is_visible:
+                                await button.click()
+                                await page.wait_for_timeout(2000)  # Wait for content to load
+                                clicks += 1
+                                clicked = True
+                                logger.debug(f"Clicked 'Load More' button on {self.source_name} (click {clicks})")
+                                break
+                    except Exception:
+                        continue
+                
+                if not clicked:
+                    break  # No more buttons to click
+        except Exception as e:
+            logger.warning(f"Error clicking load more on {self.source_name}: {e}")
+        
+        return clicks
+    
+    async def extract_job_details(self, page: Page, job_url: str) -> Dict[str, str]:
+        """Extract detailed information from a job page (salary, location, full description, etc.)"""
+        details = {}
+        try:
+            # Navigate to job page
+            await page.goto(job_url, wait_until='domcontentloaded', timeout=15000)
+            await page.wait_for_timeout(2000)
+            
+            content = await page.content()
+            soup = BeautifulSoup(content, 'html.parser')
+            
+            # Try to extract salary
+            salary_patterns = [
+                r'\$[\d,]+(?:k|K)?(?:\s*-\s*\$?[\d,]+(?:k|K)?)?',
+                r'[\d,]+(?:k|K)?\s*USD',
+                r'€[\d,]+',
+                r'£[\d,]+',
+            ]
+            text = soup.get_text()
+            for pattern in salary_patterns:
+                match = re.search(pattern, text)
+                if match:
+                    details['salary'] = match.group(0)
+                    break
+            
+            # Try to extract location
+            location_selectors = [
+                '[class*="location"]',
+                '[class*="city"]',
+                '[data-location]',
+                '[itemprop="jobLocation"]',
+            ]
+            for selector in location_selectors:
+                elem = soup.select_one(selector)
+                if elem:
+                    details['location'] = elem.get_text(strip=True)
+                    break
+            
+            # Extract full description
+            desc_selectors = [
+                '[class*="description"]',
+                '[class*="job-description"]',
+                '[id*="description"]',
+                'article',
+                'main',
+            ]
+            for selector in desc_selectors:
+                elem = soup.select_one(selector)
+                if elem:
+                    details['full_description'] = elem.get_text(strip=True)[:1000]
+                    break
+            
+        except Exception as e:
+            logger.debug(f"Error extracting job details from {job_url}: {e}")
+        
+        return details
+    
+    async def get_page_content(self, url: str, take_screenshot: bool = False, screenshot_path: str = None, 
+                              handle_scroll: bool = False, handle_load_more: bool = False) -> tuple[Optional[str], Optional[Page]]:
+        """Get page content after JavaScript rendering with advanced features
+        
+        Args:
+            url: URL to load
+            take_screenshot: Whether to take a screenshot
+            screenshot_path: Path for screenshot
+            handle_scroll: Whether to handle infinite scroll
+            handle_load_more: Whether to click "Load More" buttons
         
         Returns:
             tuple: (content, page) - Returns content and page object if take_screenshot is True
@@ -293,13 +485,29 @@ class JobScraper:
             # Wait for job list to load if selector is provided
             if self.job_list_selector:
                 try:
-                    # Try to wait for any job-related element
-                    await page.wait_for_selector('body', timeout=5000)
-                    # Additional wait for content to render
-                    await page.wait_for_timeout(3000)  # 3 seconds for JS to render
-                    logger.info(f"Page loaded for {self.source_name}")
+                    # Try to wait for job list container
+                    await page.wait_for_selector(self.job_list_selector, timeout=10000)
+                    logger.info(f"Job list container found for {self.source_name}")
                 except PlaywrightTimeoutError:
-                    logger.warning(f"Timeout waiting for content on {self.source_name}, continuing anyway...")
+                    logger.warning(f"Job list selector not found for {self.source_name}, trying generic selectors...")
+                    # Fallback: wait for common job-related elements
+                    try:
+                        await page.wait_for_selector('article, [class*="job"], [class*="listing"]', timeout=5000)
+                    except PlaywrightTimeoutError:
+                        pass
+            
+            # Additional wait for content to render
+            await page.wait_for_timeout(3000)  # 3 seconds for JS to render
+            
+            # Handle infinite scroll if requested
+            if handle_scroll:
+                await self.handle_infinite_scroll(page, max_scrolls=3)
+            
+            # Handle "Load More" buttons if requested
+            if handle_load_more:
+                clicks = await self.click_load_more(page, 'button:has-text("Load More")', max_clicks=3)
+                if clicks > 0:
+                    logger.info(f"Clicked 'Load More' {clicks} time(s) on {self.source_name}")
             
             # Wait a bit more for any lazy-loaded content
             await page.wait_for_timeout(2000)  # 2 seconds
@@ -342,48 +550,60 @@ class Web3CareerScraper(JobScraper):
         self.search_url = "https://web3.career/remote-jobs"
 
     async def scrape(self) -> List[Job]:
-        """Scrape Web3.career"""
+        """Scrape Web3.career with advanced features"""
         jobs = []
         page = None
         try:
             logger.info(f"Scraping {self.source_name}...")
-            content, _ = await self.get_page_content(self.search_url)
+            # Use advanced page loading with scroll support
+            content, page = await self.get_page_content(
+                self.search_url,
+                handle_scroll=True,
+                handle_load_more=True
+            )
             
             if not content:
                 # Try homepage as fallback
                 logger.info(f"Trying homepage for {self.source_name}...")
-                content, _ = await self.get_page_content(self.base_url)
+                content, page = await self.get_page_content(
+                    self.base_url,
+                    handle_scroll=True,
+                    handle_load_more=True
+                )
             
             if not content:
                 return jobs
             
             soup = BeautifulSoup(content, 'html.parser')
             
-            # Web3.career: Uses table structure - target tbody tr or div.table_row
+            # Advanced selector strategy for Web3.career
+            job_elements = []
+            
+            # Strategy 1: Table structure (primary)
             job_elements = soup.select('tbody tr')
             
+            # Strategy 2: Div table rows
             if not job_elements:
-                # Try div.table_row
                 job_elements = soup.find_all('div', class_=re.compile(r'table_row|table-row', re.I))
             
+            # Strategy 3: Generic row classes
             if not job_elements:
-                # Fallback: Try divs with row class
                 job_elements = soup.find_all('div', class_=re.compile(r'row', re.I))
             
+            # Strategy 4: Table rows without tbody
             if not job_elements:
-                # Try table rows without tbody
                 job_elements = soup.find_all('tr', class_=re.compile(r'job|listing|row', re.I))
             
+            # Strategy 5: Article/div with job classes
             if not job_elements:
-                # Try article or div elements with job-related classes
                 job_elements = soup.find_all(['article', 'div'], class_=re.compile(r'job|listing|card', re.I))
             
+            # Strategy 6: Links to job pages
             if not job_elements:
-                # Try links to job pages
                 job_elements = soup.find_all('a', href=re.compile(r'/job/|/jobs/'))
             
+            # Strategy 7: Data attributes
             if not job_elements:
-                # Try more generic selectors
                 job_elements = soup.find_all(['div', 'li'], attrs={'data-job-id': True}) or \
                               soup.find_all(['div', 'li'], class_=re.compile(r'item|post', re.I))
             
@@ -392,20 +612,24 @@ class Web3CareerScraper(JobScraper):
             # Debug: Take screenshot if 0 jobs found
             if len(job_elements) == 0:
                 logger.warning("Found 0 jobs. Taking debug screenshot...")
-                # Re-fetch page with screenshot
                 screenshot_path = "debug_web3_career.png"
-                content, page = await self.get_page_content(self.search_url, take_screenshot=True, screenshot_path=screenshot_path)
+                content, page = await self.get_page_content(
+                    self.search_url,
+                    take_screenshot=True,
+                    screenshot_path=screenshot_path,
+                    handle_scroll=True
+                )
                 if not content:
-                    # Try homepage
-                    content, page = await self.get_page_content(self.base_url, take_screenshot=True, screenshot_path=screenshot_path)
+                    content, page = await self.get_page_content(
+                        self.base_url,
+                        take_screenshot=True,
+                        screenshot_path=screenshot_path,
+                        handle_scroll=True
+                    )
                 logger.info(f"Debug screenshot saved to {screenshot_path}")
             
-            # Debug: Print first element HTML if elements found but no jobs parsed
-            if len(job_elements) > 0:
-                first_element_html = str(job_elements[0])[:500]  # First 500 chars
-                logger.debug(f"First element HTML sample: {first_element_html}")
-            
-            for element in job_elements[:20]:  # Limit to first 20
+            # Parse all found elements (increased limit)
+            for element in job_elements[:50]:  # Increased from 20
                 try:
                     job = self.parse_job(element)
                     if job:
@@ -417,7 +641,7 @@ class Web3CareerScraper(JobScraper):
             # Debug output if elements found but no jobs parsed
             if len(job_elements) > 0 and len(jobs) == 0:
                 logger.warning(f"Found {len(job_elements)} elements but parsed 0 jobs. First element HTML:")
-                logger.warning(str(job_elements[0])[:1000])  # Print first 1000 chars for debugging
+                logger.warning(str(job_elements[0])[:1000])
                     
         except Exception as e:
             logger.error(f"Error scraping {self.source_name}: {e}")
@@ -486,37 +710,57 @@ class Web3CareerScraper(JobScraper):
 
 
 class CryptoJobsListScraper(JobScraper):
-    """Scraper for CryptoJobsList.com"""
+    """Advanced scraper for CryptoJobsList.com with pagination and infinite scroll support"""
     
     def __init__(self):
         super().__init__(
             "CryptoJobsList.com",
             "https://cryptojobslist.com",
-            job_list_selector='article, [class*="job"], [class*="listing"]',
+            job_list_selector='article, [class*="job"], [class*="listing"], [data-job-id]',
             wait_timeout=30000
         )
         self.search_url = "https://cryptojobslist.com"
 
     async def scrape(self) -> List[Job]:
-        """Scrape CryptoJobsList.com"""
+        """Scrape CryptoJobsList.com with advanced features"""
         jobs = []
+        page = None
         try:
             logger.info(f"Scraping {self.source_name}...")
-            content, _ = await self.get_page_content(self.search_url)
+            
+            # Use advanced page loading with scroll and load more support
+            content, page = await self.get_page_content(
+                self.search_url, 
+                take_screenshot=False,
+                handle_scroll=True,  # Handle infinite scroll
+                handle_load_more=True  # Click "Load More" buttons
+            )
             
             if not content:
                 return jobs
             
             soup = BeautifulSoup(content, 'html.parser')
             
-            # Look for job listings
-            job_elements = soup.find_all(['article', 'div', 'li'], class_=re.compile(r'job|listing|card|item', re.I))
+            # Advanced selector strategy: Try multiple approaches
+            job_elements = []
             
+            # Strategy 1: Data attributes (most reliable)
+            job_elements = soup.find_all(attrs={'data-job-id': True})
+            
+            # Strategy 2: Semantic HTML
+            if not job_elements:
+                job_elements = soup.find_all('article')
+            
+            # Strategy 3: Class-based selectors with multiple patterns
+            if not job_elements:
+                job_elements = soup.find_all(['div', 'li'], class_=re.compile(r'job|listing|card|item|post', re.I))
+            
+            # Strategy 4: Links to job pages
             if not job_elements:
                 job_elements = soup.find_all('a', href=re.compile(r'/job/|/jobs/|/position/'))
             
+            # Strategy 5: Generic selectors
             if not job_elements:
-                # Try more generic selectors
                 job_elements = soup.find_all(['div', 'section'], attrs={'data-job': True}) or \
                               soup.find_all(['div', 'li'], class_=re.compile(r'post|entry', re.I))
             
@@ -527,7 +771,8 @@ class CryptoJobsListScraper(JobScraper):
                 first_element_html = str(job_elements[0])[:500]  # First 500 chars
                 logger.debug(f"First element HTML sample: {first_element_html}")
             
-            for element in job_elements[:20]:
+            # Parse all found elements (increased limit for better coverage)
+            for element in job_elements[:50]:  # Increased from 20 to 50
                 try:
                     job = self.parse_job(element)
                     if job:
@@ -543,39 +788,106 @@ class CryptoJobsListScraper(JobScraper):
                     
         except Exception as e:
             logger.error(f"Error scraping {self.source_name}: {e}")
+        finally:
+            if page:
+                await page.close()
         
         return jobs
 
     def parse_job(self, element, job_url: str = None) -> Optional[Job]:
-        """Parse a CryptoJobsList.com job element"""
+        """Parse a CryptoJobsList.com job element with advanced extraction"""
         try:
-            title_elem = element.find(['h2', 'h3', 'h4', 'a'], class_=re.compile(r'title|name|job', re.I))
-            if not title_elem:
-                title_elem = element.find('a', href=re.compile(r'/job/'))
+            # Advanced title extraction: Try multiple strategies
+            title = None
+            title_elem = None
             
+            # Strategy 1: Data attributes
             if not title_elem:
-                return None
+                title_elem = element.find(attrs={'data-job-title': True})
+                if title_elem:
+                    title = title_elem.get('data-job-title')
             
-            title = title_elem.get_text(strip=True)
+            # Strategy 2: Heading tags with class patterns
+            if not title_elem:
+                title_elem = element.find(['h1', 'h2', 'h3', 'h4'], class_=re.compile(r'title|name|job|heading', re.I))
+            
+            # Strategy 3: Any heading tag
+            if not title_elem:
+                title_elem = element.find(['h1', 'h2', 'h3', 'h4', 'h5'])
+            
+            # Strategy 4: Link with job URL pattern
+            if not title_elem:
+                title_elem = element.find('a', href=re.compile(r'/job/|/jobs/|/position/'))
+            
+            # Strategy 5: First link in element
+            if not title_elem:
+                title_elem = element.find('a', href=True)
+            
+            if title_elem:
+                if not title:
+                    title = title_elem.get_text(strip=True)
+            
             if not title or len(title) < 5:
                 return None
             
+            # Advanced URL extraction
+            url = job_url or self.base_url
             link = element.find('a', href=True)
             if link:
-                url = link['href']
-                if not url.startswith('http'):
-                    url = f"{self.base_url}{url}"
+                href = link.get('href', '')
+                if href:
+                    if not href.startswith('http'):
+                        url = f"{self.base_url}{href}" if not href.startswith('/') else f"{self.base_url}{href}"
+                    else:
+                        url = href
+            
+            # Advanced company extraction
+            company = "Unknown"
+            # Strategy 1: Data attributes
+            company_elem = element.find(attrs={'data-company': True})
+            if company_elem:
+                company = company_elem.get('data-company')
             else:
-                url = job_url or self.base_url
+                # Strategy 2: Class-based selectors
+                company_elem = element.find(['span', 'div', 'p', 'a'], class_=re.compile(r'company|employer|organization|brand', re.I))
+                if company_elem:
+                    company = company_elem.get_text(strip=True)
+                else:
+                    # Strategy 3: Look for company in common patterns
+                    text = element.get_text('\n', strip=True)
+                    lines = text.split('\n')
+                    for line in lines[:5]:  # Check first 5 lines
+                        if any(indicator in line.lower() for indicator in ['@', 'at ', 'company:', 'employer:']):
+                            # Extract company name
+                            parts = re.split(r'[@:]', line, maxsplit=1)
+                            if len(parts) > 1:
+                                company = parts[-1].strip().split()[0] if parts[-1].strip().split() else company
+                                break
             
-            company_elem = element.find(['span', 'div', 'p'], class_=re.compile(r'company|employer', re.I))
-            company = company_elem.get_text(strip=True) if company_elem else "Unknown"
+            # Advanced description extraction
+            description = ""
+            # Strategy 1: Data attributes
+            desc_elem = element.find(attrs={'data-description': True})
+            if desc_elem:
+                description = desc_elem.get('data-description')
+            else:
+                # Strategy 2: Class-based selectors
+                desc_elem = element.find(['p', 'div', 'span'], class_=re.compile(r'description|summary|excerpt|snippet|text', re.I))
+                if desc_elem:
+                    description = desc_elem.get_text(strip=True)
             
-            desc_elem = element.find(['p', 'div'], class_=re.compile(r'description|summary|excerpt', re.I))
-            description = desc_elem.get_text(strip=True) if desc_elem else ""
-            
+            # Fallback: Get all text from element
             if not description:
-                description = element.get_text(strip=True)[:500]
+                description = element.get_text(strip=True, separator=' ')[:500]
+            
+            # Extract posted date if available
+            posted_date = None
+            date_elem = element.find(['time', 'span', 'div'], class_=re.compile(r'date|posted|time', re.I))
+            if date_elem:
+                posted_date = date_elem.get_text(strip=True)
+                # Try to get datetime attribute
+                if date_elem.get('datetime'):
+                    posted_date = date_elem.get('datetime')
             
             priority, reason = JobRanker.rank_job(title, description)
             
@@ -589,7 +901,8 @@ class CryptoJobsListScraper(JobScraper):
                 description=description[:300],
                 source=self.source_name,
                 priority=priority,
-                priority_reason=reason
+                priority_reason=reason,
+                posted_date=posted_date
             )
         except Exception as e:
             logger.warning(f"Error parsing job: {e}")
@@ -609,64 +922,91 @@ class CryptocurrencyJobsScraper(JobScraper):
         self.search_url = "https://cryptocurrencyjobs.co"
 
     async def scrape(self) -> List[Job]:
-        """Scrape CryptocurrencyJobs.co - using H2 headings approach"""
+        """Scrape CryptocurrencyJobs.co with advanced features"""
         jobs = []
+        page = None
         try:
             logger.info(f"Scraping {self.source_name}...")
-            content, _ = await self.get_page_content(self.search_url)
+            # Use advanced page loading
+            content, page = await self.get_page_content(
+                self.search_url,
+                handle_scroll=True,
+                handle_load_more=True
+            )
             
             if not content:
                 return jobs
             
             soup = BeautifulSoup(content, 'html.parser')
             
-            # Search for H2 headings in main (job titles are H2)
+            # Advanced selector strategy
+            job_elements = []
+            
+            # Strategy 1: H2 headings in main (original approach)
             main_elem = soup.find('main')
-            if not main_elem:
-                return jobs
+            if main_elem:
+                h2_elements = main_elem.find_all('h2')
+                # Convert H2 elements to job elements for consistent parsing
+                for h2 in h2_elements:
+                    title_text = h2.get_text(strip=True)
+                    if title_text and len(title_text) >= 5:
+                        if 'talent collective' not in title_text.lower() and 'subscribe' not in title_text.lower():
+                            job_elements.append(h2)
             
-            h2_elements = main_elem.find_all('h2')
+            # Strategy 2: Article elements
+            if not job_elements:
+                job_elements = soup.find_all('article')
             
-            logger.info(f"Found {len(h2_elements)} H2 headings from {self.source_name}")
+            # Strategy 3: Links to job pages
+            if not job_elements:
+                job_elements = soup.find_all('a', href=re.compile(r'/job/|/jobs/'))
             
-            for h2_elem in h2_elements[:30]:  # Limit to first 30
+            # Strategy 4: Data attributes
+            if not job_elements:
+                job_elements = soup.find_all(['div', 'li'], attrs={'data-job-id': True})
+            
+            logger.info(f"Found {len(job_elements)} potential job elements from {self.source_name}")
+            
+            for element in job_elements[:50]:  # Increased limit
                 try:
-                    # Get text content
-                    title_text = h2_elem.get_text(strip=True)
+                    # Handle H2 elements specially
+                    if element.name == 'h2':
+                        title_text = element.get_text(strip=True)
+                        if not title_text or len(title_text) < 5:
+                            continue
+                        if 'talent collective' in title_text.lower() or 'subscribe' in title_text.lower():
+                            continue
+                        
+                        # Find parent <a> tag or closest ancestor
+                        link = element.find_parent('a')
+                        if not link:
+                            parent = element.parent
+                            if parent:
+                                link = parent.find('a')
+                        
+                        url = self.base_url
+                        if link and link.get('href'):
+                            href = link['href']
+                            if not href.startswith('http'):
+                                url = f"{self.base_url}{href}"
+                            else:
+                                url = href
+                        
+                        job = self.parse_job_from_h2(title_text, url)
+                    else:
+                        job = self.parse_job(element)
                     
-                    # Filter: Skip if "Talent Collective" or "Subscribe"
-                    if not title_text or len(title_text) < 5:
-                        continue
-                    if 'talent collective' in title_text.lower() or 'subscribe' in title_text.lower():
-                        continue
-                    
-                    # Find parent <a> tag or closest ancestor
-                    link = h2_elem.find_parent('a')
-                    if not link:
-                        # Try finding a link near the H2 (sibling or parent's sibling)
-                        parent = h2_elem.parent
-                        if parent:
-                            link = parent.find('a')
-                    
-                    # Get URL
-                    url = self.base_url
-                    if link and link.get('href'):
-                        href = link['href']
-                        if not href.startswith('http'):
-                            url = f"{self.base_url}{href}"
-                        else:
-                            url = href
-                    
-                    # Create job from H2
-                    job = self.parse_job_from_h2(title_text, url)
                     if job:
                         jobs.append(job)
                 except Exception as e:
-                    logger.warning(f"Error parsing H2 element: {e}")
+                    logger.warning(f"Error parsing job element: {e}")
                     continue
                     
         except Exception as e:
             logger.error(f"Error scraping {self.source_name}: {e}")
+        finally:
+            if page:
+                await page.close()
         
         return jobs
     
@@ -776,28 +1116,44 @@ class DelphiVenturesScraper(JobScraper):
         self.search_url = "https://jobs.delphiventures.io/jobs?filter=eyJqb2JfZnVuY3Rpb25zIjpbIklUIl19"
 
     async def scrape(self) -> List[Job]:
-        """Scrape Delphi Ventures job board"""
+        """Scrape Delphi Ventures job board with advanced features"""
         jobs = []
+        page = None
         try:
             logger.info(f"Scraping {self.source_name}...")
-            content, _ = await self.get_page_content(self.search_url)
+            # Use advanced page loading
+            content, page = await self.get_page_content(
+                self.search_url,
+                handle_scroll=True,
+                handle_load_more=True
+            )
             
             if not content:
                 return jobs
             
             soup = BeautifulSoup(content, 'html.parser')
             
-            # Getro job boards typically use article or div with job classes
-            # Look for job cards - they usually have company name, title, location
-            job_elements = soup.find_all(['article', 'div'], class_=re.compile(r'job|listing|card|item', re.I))
+            # Advanced selector strategy for Getro-powered boards
+            job_elements = []
             
-            # Alternative: look for links to job pages
+            # Strategy 1: Article elements (Getro standard)
+            job_elements = soup.find_all('article')
+            
+            # Strategy 2: Divs with job-related classes
+            if not job_elements:
+                job_elements = soup.find_all(['div', 'li'], class_=re.compile(r'job|listing|card|item', re.I))
+            
+            # Strategy 3: Links to job pages
             if not job_elements:
                 job_elements = soup.find_all('a', href=re.compile(r'/jobs/|/job/'))
             
+            # Strategy 4: Data attributes
+            if not job_elements:
+                job_elements = soup.find_all(['div', 'li'], attrs={'data-job-id': True})
+            
             logger.info(f"Found {len(job_elements)} potential job elements from {self.source_name}")
             
-            for element in job_elements[:30]:  # Limit to first 30
+            for element in job_elements[:50]:  # Increased limit
                 try:
                     job = self.parse_job(element)
                     if job:
@@ -808,6 +1164,9 @@ class DelphiVenturesScraper(JobScraper):
                     
         except Exception as e:
             logger.error(f"Error scraping {self.source_name}: {e}")
+        finally:
+            if page:
+                await page.close()
         
         return jobs
 
