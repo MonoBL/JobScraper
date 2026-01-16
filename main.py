@@ -1171,14 +1171,29 @@ class DelphiVenturesScraper(JobScraper):
         return jobs
 
     def parse_job(self, element, job_url: str = None) -> Optional[Job]:
-        """Parse a Delphi Ventures job element"""
+        """Parse a Delphi Ventures job element with improved extraction"""
         try:
-            # Getro structure: usually has company name, job title, location
-            # Title is often in h2, h3, or h4
-            title_elem = element.find(['h2', 'h3', 'h4', 'h5'])
+            # Getro structure: Look for job title in multiple places
+            title = None
+            title_elem = None
+            
+            # Strategy 1: Look for h2-h5 headings (most common)
+            title_elem = element.find(['h2', 'h3', 'h4', 'h5', 'h6'])
+            
+            # Strategy 2: Look for title in link text
             if not title_elem:
-                # Try finding title in a link
                 title_elem = element.find('a', href=re.compile(r'/jobs/|/job/'))
+            
+            # Strategy 3: Look for any link with meaningful text
+            if not title_elem:
+                links = element.find_all('a', href=True)
+                for link in links:
+                    text = link.get_text(strip=True)
+                    if text and len(text) > 5 and len(text) < 200:
+                        # Skip navigation links
+                        if not any(skip in text.lower() for skip in ['subscribe', 'read more', 'apply', 'view all']):
+                            title_elem = link
+                            break
             
             if not title_elem:
                 return None
@@ -1187,48 +1202,93 @@ class DelphiVenturesScraper(JobScraper):
             if not title or len(title) < 5:
                 return None
             
-            # Skip if it's clearly not a job (e.g., "Subscribe", "Get in touch")
-            if any(skip in title.lower() for skip in ['subscribe', 'get in touch', 'privacy', 'cookie']):
+            # Skip if it's clearly not a job
+            if any(skip in title.lower() for skip in ['subscribe', 'get in touch', 'privacy', 'cookie', 'read more about']):
                 return None
             
-            # Extract URL
-            link = element.find('a', href=True)
+            # Extract URL - prioritize job detail links
+            url = job_url or self.base_url
+            link = element.find('a', href=re.compile(r'/jobs/|/job/'))
             if link and link.get('href'):
-                url = link['href']
-                if not url.startswith('http'):
-                    url = f"{self.base_url}{url}"
-            else:
-                # Try to find link in parent
-                parent_link = element.find_parent('a', href=True)
-                if parent_link:
-                    url = parent_link['href']
-                    if not url.startswith('http'):
-                        url = f"{self.base_url}{url}"
+                href = link['href']
+                if not href.startswith('http'):
+                    url = f"{self.base_url}{href}" if not href.startswith('/') else f"{self.base_url}{href}"
                 else:
-                    url = job_url or self.base_url
-            
-            # Extract company name (often appears before title or in a separate element)
-            company = "Unknown"
-            # Look for company in common patterns
-            company_elem = element.find(['span', 'div', 'p'], class_=re.compile(r'company|employer|organization', re.I))
-            if company_elem:
-                company = company_elem.get_text(strip=True)
+                    url = href
             else:
-                # Try to find company name in text (often appears as "CompanyName\nJob Title")
-                text_parts = element.get_text('\n', strip=True).split('\n')
-                if len(text_parts) > 1:
-                    # First non-empty line might be company
-                    for part in text_parts[:3]:
-                        if part and len(part) < 50 and part.lower() != title.lower():
-                            company = part.strip()
-                            break
+                # Fallback: find any link
+                link = element.find('a', href=True)
+                if link and link.get('href'):
+                    href = link['href']
+                    if not href.startswith('http'):
+                        url = f"{self.base_url}{href}" if not href.startswith('/') else f"{self.base_url}{href}"
+                    else:
+                        url = href
             
-            # Extract description
-            desc_elem = element.find(['p', 'div'], class_=re.compile(r'description|summary|excerpt', re.I))
-            description = desc_elem.get_text(strip=True) if desc_elem else ""
+            # Extract company name - improved strategy
+            company = "Unknown"
             
+            # Strategy 1: Look for company logo or brand element
+            company_elem = element.find(['img'], alt=True)
+            if company_elem and company_elem.get('alt'):
+                alt_text = company_elem.get('alt', '')
+                if alt_text and len(alt_text) < 50:
+                    company = alt_text.strip()
+            
+            # Strategy 2: Look for company in structured elements
+            if company == "Unknown":
+                company_elem = element.find(['span', 'div', 'p', 'h3', 'h4'], class_=re.compile(r'company|employer|organization|brand|logo', re.I))
+                if company_elem:
+                    company = company_elem.get_text(strip=True)
+            
+            # Strategy 3: Look for company name in text structure (Getro often has "CompanyName\nJob Title")
+            if company == "Unknown":
+                # Get all text and split by newlines
+                full_text = element.get_text('\n', strip=True)
+                lines = [line.strip() for line in full_text.split('\n') if line.strip()]
+                
+                # Company is usually before the title in the structure
+                title_idx = -1
+                for i, line in enumerate(lines):
+                    if title.lower() in line.lower() or line.lower() in title.lower():
+                        title_idx = i
+                        break
+                
+                # Company is likely the line before title, or first line
+                if title_idx > 0:
+                    company = lines[title_idx - 1]
+                elif len(lines) > 0:
+                    # First line might be company
+                    first_line = lines[0]
+                    if first_line != title and len(first_line) < 50:
+                        company = first_line
+            
+            # Strategy 4: Extract from URL if it contains company name
+            if company == "Unknown" and '/jobs/' in url:
+                # Sometimes URL is like /jobs/company-name/job-title
+                url_parts = url.split('/jobs/')
+                if len(url_parts) > 1:
+                    path_parts = url_parts[1].split('/')
+                    if len(path_parts) > 0:
+                        potential_company = path_parts[0].replace('-', ' ').title()
+                        if len(potential_company) < 50:
+                            company = potential_company
+            
+            # Extract description - get more context
+            description = ""
+            desc_elem = element.find(['p', 'div'], class_=re.compile(r'description|summary|excerpt|text', re.I))
+            if desc_elem:
+                description = desc_elem.get_text(strip=True)
+            
+            # Fallback: get all text but exclude title and company
             if not description:
-                description = element.get_text(strip=True)[:500]
+                all_text = element.get_text(strip=True, separator=' ')
+                # Remove title and company from description
+                description = all_text.replace(title, '').replace(company, '').strip()[:500]
+            
+            # If still no description, use title
+            if not description:
+                description = title
             
             # Rank the job
             priority, reason = JobRanker.rank_job(title, description)
@@ -1495,31 +1555,29 @@ class DiscordNotifier:
                 })
             embeds.append(embed)
         
-        # Embed 4: Weak Matches (condensed)
+        # Embed 4: Weak Matches - Show ALL jobs (split into multiple embeds if needed)
         if weak_matches:
-            # Group weak matches by source
-            weak_by_source = {}
-            for job in weak_matches:
-                source = job.source
-                if source not in weak_by_source:
-                    weak_by_source[source] = []
-                weak_by_source[source].append(job)
+            # Discord limit: 25 fields per embed, 6000 chars per embed
+            # Split weak matches into chunks of 20 to stay safe
+            chunk_size = 20
+            weak_chunks = [weak_matches[i:i + chunk_size] for i in range(0, len(weak_matches), chunk_size)]
             
-            embed = {
-                "title": "🔍 Other Potential Roles",
-                "description": f"**{len(weak_matches)}** weak match(es) - review manually",
-                "color": 9807270,  # Grey
-                "fields": []
-            }
-            
-            # Show up to 6 weak matches (condensed format)
-            for job in weak_matches[:6]:
-                embed["fields"].append({
-                    "name": f"{job.title}",
-                    "value": f"🏢 {job.company} | 🔗 [View]({job.url}) | 📍 {job.source}",
-                    "inline": True
-                })
-            embeds.append(embed)
+            for chunk_idx, chunk in enumerate(weak_chunks):
+                embed = {
+                    "title": f"🔍 Other Potential Roles" + (f" (Part {chunk_idx + 1})" if len(weak_chunks) > 1 else ""),
+                    "description": f"**{len(weak_matches)}** weak match(es) total - review manually" + (f" (showing {len(chunk)} of {len(weak_matches)})" if len(weak_chunks) > 1 else ""),
+                    "color": 9807270,  # Grey
+                    "fields": []
+                }
+                
+                # Show all weak matches in this chunk
+                for job in chunk:
+                    embed["fields"].append({
+                        "name": f"{job.title}",
+                        "value": f"🏢 {job.company} | 🔗 [View]({job.url}) | 📍 {job.source}",
+                        "inline": True
+                    })
+                embeds.append(embed)
         
         # Main message header
         content_text = f"🤖 **Bot Version: {BOT_VERSION}**\n"
@@ -1531,9 +1589,9 @@ class DiscordNotifier:
         if telegram_jobs:
             content_text += f" | 📱 Telegram: {len(telegram_jobs)}"
         
-        # If there are more weak matches, mention them
-        if len(weak_matches) > 6:
-            content_text += f"\n\n*Showing top 6 weak matches. {len(weak_matches) - 6} more available in logs.*"
+        # Note about showing all jobs
+        if len(weak_matches) > 0:
+            content_text += f"\n\n*All {len(weak_matches)} weak matches shown below.*"
         
         payload = {
             "content": content_text,
