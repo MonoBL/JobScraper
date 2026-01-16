@@ -474,7 +474,31 @@ class JobScraper:
             logger.info(f"Loading {url}...")
             
             # Use 'domcontentloaded' instead of 'networkidle' to avoid timeouts
-            await page.goto(url, wait_until='domcontentloaded', timeout=self.wait_timeout)
+            # Add error handling for download triggers (some sites trigger downloads on load)
+            try:
+                await page.goto(url, wait_until='domcontentloaded', timeout=self.wait_timeout)
+            except Exception as goto_error:
+                error_str = str(goto_error)
+                # If it's a download error, try to continue anyway (page might still have loaded)
+                if "Download" in error_str or "download" in error_str.lower() or "Download is starting" in error_str:
+                    logger.warning(f"Page triggered download for {self.source_name}, but continuing to scrape: {error_str[:100]}")
+                    # Wait a bit and try to get content anyway (page might have loaded before download started)
+                    try:
+                        await page.wait_for_timeout(3000)
+                        # Check if page actually loaded
+                        current_url = page.url
+                        if current_url and current_url != "about:blank":
+                            logger.info(f"Page loaded despite download trigger: {current_url}")
+                        else:
+                            logger.warning(f"Page did not load properly, skipping {self.source_name}")
+                            return None, None
+                    except Exception as e:
+                        logger.warning(f"Error waiting after download trigger: {e}")
+                        return None, None
+                else:
+                    # Re-raise if it's a different error
+                    logger.error(f"Error loading page {url}: {goto_error}")
+                    raise
             
             # Wait for body to ensure page is ready
             try:
@@ -1599,11 +1623,17 @@ class DiscordNotifier:
         }
         
         try:
-            response = requests.post(self.webhook_url, json=payload, timeout=10)
+            logger.debug(f"Sending payload to Discord webhook (embeds: {len(embeds)}, jobs: {len(jobs)})")
+            response = requests.post(self.webhook_url, json=payload, timeout=30)
             response.raise_for_status()
-            logger.info(f"Successfully sent {len(jobs)} jobs to Discord")
-        except Exception as e:
+            logger.info(f"Successfully sent {len(jobs)} jobs to Discord (HTTP {response.status_code})")
+        except requests.exceptions.RequestException as e:
             logger.error(f"Error sending to Discord: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Discord API response: {e.response.status_code} - {e.response.text[:500]}")
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error sending to Discord: {e}", exc_info=True)
             raise
 
 
@@ -1933,13 +1963,25 @@ async def run_daily_scrape_async():
             # SECURITY: Webhook URL must be set via environment variable or .env file
             webhook_url = os.getenv('DISCORD_WEBHOOK_URL')
             
+            # Debug: Log webhook status (without exposing the full URL)
+            if webhook_url:
+                webhook_preview = webhook_url[:50] + "..." if len(webhook_url) > 50 else webhook_url
+                logger.info(f"Discord webhook configured: {webhook_preview}")
+            else:
+                logger.warning("DISCORD_WEBHOOK_URL not set. Check .env file or environment variables.")
+                logger.warning("Current working directory: " + os.getcwd())
+                logger.warning(".env file exists: " + str(os.path.exists('.env')))
+            
             if webhook_url:
                 try:
+                    logger.info(f"Attempting to send {len(new_jobs)} jobs to Discord...")
                     notifier = DiscordNotifier(webhook_url)
                     notifier.send_summary(new_jobs)
+                    logger.info("Successfully sent jobs to Discord!")
                 except Exception as e:
-                    logger.error(f"Error sending to Discord: {e}")
+                    logger.error(f"Error sending to Discord: {e}", exc_info=True)
                     # Fallback to console output
+                    logger.info("Falling back to console output...")
                     for job in sorted(new_jobs, key=lambda x: x.priority.value):
                         print(f"\n[{job.priority.name}] {job.title} @ {job.company}")
                         print(f"  Reason: {job.priority_reason}")
