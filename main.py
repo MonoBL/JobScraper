@@ -6,7 +6,7 @@ Uses Playwright for JavaScript-rendered content.
 """
 
 # Bot version - update this when making significant changes
-BOT_VERSION = "v2.0"
+BOT_VERSION = "v2.1"
 
 import os
 import re
@@ -15,9 +15,10 @@ import logging
 import asyncio
 import random
 from datetime import datetime
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Set, Tuple
 from dataclasses import dataclass, asdict
 from enum import Enum
+from urllib.parse import urlparse, urlunparse, parse_qs
 
 from playwright.async_api import async_playwright, Browser, Page, TimeoutError as PlaywrightTimeoutError
 from bs4 import BeautifulSoup
@@ -80,31 +81,47 @@ class JobRanker:
     PERFECT_TITLES = [
         "junior devops", "sysadmin", "system administrator",
         "l2 support", "level 2 support", "infrastructure engineer",
-        "node operator", "node operations"
+        "node operator", "node operations", "site reliability engineer",
+        "sre", "devops engineer", "platform engineer"
     ]
     PERFECT_KEYWORDS = {
-        'linux': ['linux', 'ubuntu'],
-        'scripting': ['python', 'bash', 'shell scripting']
+        'linux': ['linux', 'ubuntu', 'debian', 'centos'],
+        'scripting': ['python', 'bash', 'shell scripting', 'shell script'],
+        'infrastructure': ['kubernetes', 'docker', 'terraform', 'ansible', 'ci/cd']
     }
     
     # Good Match criteria
     GOOD_TITLES = [
         "it support", "technical support", "datacenter technician",
-        "it operations", "operations engineer", "support engineer"
+        "it operations", "operations engineer", "support engineer",
+        "customer support engineer", "technical support engineer"
     ]
     GOOD_KEYWORDS = [
         "hardware", "repair", "network", "networking", "tickets",
-        "on-site", "onsite", "equipment", "server maintenance"
+        "on-site", "onsite", "equipment", "server maintenance",
+        "troubleshooting", "monitoring", "alerting", "incident response"
     ]
     
-    # Blacklist
+    # Blacklist - only filter out clearly irrelevant roles (less strict)
     BLACKLIST_TITLES = [
-        "senior solidity developer", "marketing", "sales", "hr",
-        "human resources", "legal", "lawyer", "attorney"
+        "senior solidity developer", "marketing manager", "sales manager",
+        "hr manager", "human resources manager", "legal counsel", "lawyer", "attorney",
+        "cfo", "cto", "founder", "co-founder", "product manager", "product owner",
+        "ui/ux designer", "content writer", "copywriter", "community manager",
+        "social media manager", "influencer", "accountant", "finance manager"
     ]
     BLACKLIST_KEYWORDS = [
         "senior solidity", "marketing manager", "sales manager",
-        "hr manager", "legal counsel"
+        "hr manager", "legal counsel", "10+ years experience", "15+ years",
+        "phd required", "masters required", "bachelor's degree required"
+    ]
+    
+    # Additional filter: only filter out clearly irrelevant patterns (less strict)
+    IRRELEVANT_PATTERNS = [
+        r'\b(chief|founder|co-founder|cto|ceo|cfo)\s+\w+',
+        r'\b(15|20)\+?\s*years?\s+experience',
+        r'\b(phd|masters?)\s+required',
+        r'\b(marketing|sales|legal|finance|accounting)\s+manager',
     ]
 
     @staticmethod
@@ -128,34 +145,54 @@ class JobRanker:
         desc_lower = JobRanker.normalize_text(description)
         combined = f"{title_lower} {desc_lower}"
 
-        # Check blacklist first
+        # Check blacklist patterns first (regex-based)
+        for pattern in JobRanker.IRRELEVANT_PATTERNS:
+            if re.search(pattern, combined, re.IGNORECASE):
+                return JobPriority.BLACKLISTED, f"Matches irrelevant pattern: {pattern}"
+
+        # Check blacklist titles/keywords
         if JobRanker.contains_keywords(combined, JobRanker.BLACKLIST_TITLES):
             return JobPriority.BLACKLISTED, "Contains blacklisted title/keyword"
         
         if JobRanker.contains_keywords(combined, JobRanker.BLACKLIST_KEYWORDS):
             return JobPriority.BLACKLISTED, "Contains blacklisted keyword"
 
-        # Check Perfect Match
+        # Check Perfect Match (need title + at least 1 keyword)
         has_perfect_title = JobRanker.contains_keywords(title_lower, JobRanker.PERFECT_TITLES)
         has_linux = JobRanker.contains_keywords(combined, JobRanker.PERFECT_KEYWORDS['linux'])
         has_scripting = JobRanker.contains_keywords(combined, JobRanker.PERFECT_KEYWORDS['scripting'])
+        has_infra = JobRanker.contains_keywords(combined, JobRanker.PERFECT_KEYWORDS['infrastructure'])
 
-        if has_perfect_title and has_linux and has_scripting:
-            return JobPriority.PERFECT_MATCH, "Perfect match: Title + Linux + Python/Bash"
+        keyword_count = sum([has_linux, has_scripting, has_infra])
+        
+        if has_perfect_title and keyword_count >= 1:
+            return JobPriority.PERFECT_MATCH, f"Perfect match: Title + {keyword_count} technical keyword(s)"
 
-        # Check Good Match
+        # Check Good Match (more lenient: title OR keywords)
         has_good_title = JobRanker.contains_keywords(title_lower, JobRanker.GOOD_TITLES)
         has_good_keywords = JobRanker.contains_keywords(combined, JobRanker.GOOD_KEYWORDS)
 
+        if has_good_title and has_good_keywords:
+            return JobPriority.GOOD_MATCH, "Good match: IT Support title + technical keywords"
+        
         if has_good_title or has_good_keywords:
             return JobPriority.GOOD_MATCH, "Good match: IT Support/Hardware/Network keywords"
+        
+        if keyword_count >= 1:
+            return JobPriority.GOOD_MATCH, f"Good match: Technical keywords found ({keyword_count})"
 
-        # Weak Match (generic customer support without technical keywords)
-        if "customer support" in combined or "support" in title_lower:
-            return JobPriority.WEAK_MATCH, "Generic support role"
+        # Weak Match: More lenient - include jobs with any technical or support relevance
+        if any(kw in combined for kw in ['support', 'operations', 'infrastructure', 'linux', 'python', 'devops', 
+                                         'technical', 'engineer', 'developer', 'admin', 'sysadmin', 'it', 
+                                         'network', 'server', 'cloud', 'kubernetes', 'docker', 'monitoring']):
+            return JobPriority.WEAK_MATCH, "Weak match: Some technical relevance"
 
-        # Default: Weak Match for any other job
-        return JobPriority.WEAK_MATCH, "No strong match criteria"
+        # Default: Weak Match for any crypto/web3 job (don't blacklist by default)
+        if any(kw in combined for kw in ['crypto', 'blockchain', 'web3', 'defi', 'bitcoin', 'ethereum', 'nft']):
+            return JobPriority.WEAK_MATCH, "Weak match: Crypto/Web3 related"
+
+        # Only blacklist if truly irrelevant
+        return JobPriority.WEAK_MATCH, "Weak match: Generic role - review manually"
 
 
 class PlaywrightBrowserManager:
@@ -725,6 +762,134 @@ class CryptocurrencyJobsScraper(JobScraper):
             return None
 
 
+class DelphiVenturesScraper(JobScraper):
+    """Scraper for Delphi Ventures job board (Getro-powered)"""
+    
+    def __init__(self):
+        super().__init__(
+            "Delphi Ventures",
+            "https://jobs.delphiventures.io",
+            job_list_selector='[class*="job"], [class*="listing"], article',
+            wait_timeout=30000
+        )
+        self.search_url = "https://jobs.delphiventures.io/jobs"
+
+    async def scrape(self) -> List[Job]:
+        """Scrape Delphi Ventures job board"""
+        jobs = []
+        try:
+            logger.info(f"Scraping {self.source_name}...")
+            content, _ = await self.get_page_content(self.search_url)
+            
+            if not content:
+                return jobs
+            
+            soup = BeautifulSoup(content, 'html.parser')
+            
+            # Getro job boards typically use article or div with job classes
+            # Look for job cards - they usually have company name, title, location
+            job_elements = soup.find_all(['article', 'div'], class_=re.compile(r'job|listing|card|item', re.I))
+            
+            # Alternative: look for links to job pages
+            if not job_elements:
+                job_elements = soup.find_all('a', href=re.compile(r'/jobs/|/job/'))
+            
+            logger.info(f"Found {len(job_elements)} potential job elements from {self.source_name}")
+            
+            for element in job_elements[:30]:  # Limit to first 30
+                try:
+                    job = self.parse_job(element)
+                    if job:
+                        jobs.append(job)
+                except Exception as e:
+                    logger.warning(f"Error parsing job element: {e}")
+                    continue
+                    
+        except Exception as e:
+            logger.error(f"Error scraping {self.source_name}: {e}")
+        
+        return jobs
+
+    def parse_job(self, element, job_url: str = None) -> Optional[Job]:
+        """Parse a Delphi Ventures job element"""
+        try:
+            # Getro structure: usually has company name, job title, location
+            # Title is often in h2, h3, or h4
+            title_elem = element.find(['h2', 'h3', 'h4', 'h5'])
+            if not title_elem:
+                # Try finding title in a link
+                title_elem = element.find('a', href=re.compile(r'/jobs/|/job/'))
+            
+            if not title_elem:
+                return None
+            
+            title = title_elem.get_text(strip=True)
+            if not title or len(title) < 5:
+                return None
+            
+            # Skip if it's clearly not a job (e.g., "Subscribe", "Get in touch")
+            if any(skip in title.lower() for skip in ['subscribe', 'get in touch', 'privacy', 'cookie']):
+                return None
+            
+            # Extract URL
+            link = element.find('a', href=True)
+            if link and link.get('href'):
+                url = link['href']
+                if not url.startswith('http'):
+                    url = f"{self.base_url}{url}"
+            else:
+                # Try to find link in parent
+                parent_link = element.find_parent('a', href=True)
+                if parent_link:
+                    url = parent_link['href']
+                    if not url.startswith('http'):
+                        url = f"{self.base_url}{url}"
+                else:
+                    url = job_url or self.base_url
+            
+            # Extract company name (often appears before title or in a separate element)
+            company = "Unknown"
+            # Look for company in common patterns
+            company_elem = element.find(['span', 'div', 'p'], class_=re.compile(r'company|employer|organization', re.I))
+            if company_elem:
+                company = company_elem.get_text(strip=True)
+            else:
+                # Try to find company name in text (often appears as "CompanyName\nJob Title")
+                text_parts = element.get_text('\n', strip=True).split('\n')
+                if len(text_parts) > 1:
+                    # First non-empty line might be company
+                    for part in text_parts[:3]:
+                        if part and len(part) < 50 and part.lower() != title.lower():
+                            company = part.strip()
+                            break
+            
+            # Extract description
+            desc_elem = element.find(['p', 'div'], class_=re.compile(r'description|summary|excerpt', re.I))
+            description = desc_elem.get_text(strip=True) if desc_elem else ""
+            
+            if not description:
+                description = element.get_text(strip=True)[:500]
+            
+            # Rank the job
+            priority, reason = JobRanker.rank_job(title, description)
+            
+            if priority == JobPriority.BLACKLISTED:
+                return None
+            
+            return Job(
+                title=title,
+                company=company,
+                url=url,
+                description=description[:300],
+                source=self.source_name,
+                priority=priority,
+                priority_reason=reason
+            )
+        except Exception as e:
+            logger.warning(f"Error parsing job: {e}")
+            return None
+
+
 class TelegramScraper(JobScraper):
     """Scraper for Telegram channels using web preview"""
     
@@ -887,7 +1052,7 @@ class DiscordNotifier:
         self.webhook_url = webhook_url
     
     def send_summary(self, jobs: List[Job]):
-        """Send formatted job summary to Discord"""
+        """Send formatted job summary to Discord with improved layout"""
         if not jobs:
             logger.info("No jobs to send to Discord")
             return
@@ -895,7 +1060,7 @@ class DiscordNotifier:
         # Sort jobs by priority
         sorted_jobs = sorted(jobs, key=lambda x: x.priority.value)
         
-        # Separate Telegram jobs from other sources
+        # Separate by source and priority
         telegram_jobs = [j for j in sorted_jobs if 'Telegram' in j.source]
         other_jobs = [j for j in sorted_jobs if 'Telegram' not in j.source]
         
@@ -904,58 +1069,111 @@ class DiscordNotifier:
         good_matches = [j for j in other_jobs if j.priority == JobPriority.GOOD_MATCH]
         weak_matches = [j for j in other_jobs if j.priority == JobPriority.WEAK_MATCH]
         
-        # Build embeds with cleaner layout
+        # Group by source for better organization
+        jobs_by_source = {}
+        for job in other_jobs:
+            source = job.source
+            if source not in jobs_by_source:
+                jobs_by_source[source] = []
+            jobs_by_source[source].append(job)
+        
+        # Build embeds with improved layout
         embeds = []
         
-        # Embed 1: Top Matches (Perfect & Good combined)
-        top_matches = perfect_matches + good_matches
-        if top_matches:
+        # Embed 1: Perfect Matches (separate for visibility)
+        if perfect_matches:
             embed = {
-                "title": "🏆 Top Matches",
+                "title": "🥇 Perfect Matches",
+                "description": f"**{len(perfect_matches)}** perfect match(es) found!",
+                "color": 3066993,  # Green
+                "fields": []
+            }
+            for job in perfect_matches[:8]:  # Limit to 8 for readability
+                embed["fields"].append({
+                    "name": f"**{job.title}**",
+                    "value": f"🏢 {job.company}\n📝 {job.priority_reason}\n🔗 [View Job]({job.url})\n📍 *{job.source}*",
+                    "inline": False
+                })
+            embeds.append(embed)
+        
+        # Embed 2: Good Matches
+        if good_matches:
+            embed = {
+                "title": "🥈 Good Matches",
+                "description": f"**{len(good_matches)}** good match(es) found",
                 "color": 15844367,  # Gold
                 "fields": []
             }
-            # Limit to 10 to avoid Discord message length limits
-            for job in top_matches[:10]:
-                priority_emoji = "🥇" if job.priority == JobPriority.PERFECT_MATCH else "🥈"
+            for job in good_matches[:8]:  # Limit to 8
                 embed["fields"].append({
-                    "name": f"{priority_emoji} **{job.title}** @ {job.company}",
-                    "value": f"{job.priority_reason}\n[View Job]({job.url})\n*{job.source}*",
+                    "name": f"**{job.title}**",
+                    "value": f"🏢 {job.company}\n📝 {job.priority_reason}\n🔗 [View Job]({job.url})\n📍 *{job.source}*",
                     "inline": False
                 })
             embeds.append(embed)
         
-        # Embed 2: Telegram Finds
+        # Embed 3: Telegram Finds (grouped by channel)
         if telegram_jobs:
+            telegram_by_channel = {}
+            for job in telegram_jobs:
+                channel = job.source
+                if channel not in telegram_by_channel:
+                    telegram_by_channel[channel] = []
+                telegram_by_channel[channel].append(job)
+            
             embed = {
                 "title": "📱 Telegram Finds",
+                "description": f"**{len(telegram_jobs)}** job(s) from Telegram channels",
                 "color": 3447003,  # Blue
                 "fields": []
             }
-            # Limit to 10 to avoid Discord message length limits
-            for job in telegram_jobs[:10]:
+            for job in telegram_jobs[:8]:  # Limit to 8
                 embed["fields"].append({
                     "name": f"**{job.title}**",
-                    "value": f"[View Message]({job.url})\n*{job.source}*",
+                    "value": f"🏢 {job.company}\n🔗 [View Message]({job.url})\n📍 *{job.source}*",
                     "inline": False
                 })
             embeds.append(embed)
         
-        # Build weak matches as text list at the bottom (to save space)
-        weak_matches_text = ""
+        # Embed 4: Weak Matches (condensed)
         if weak_matches:
-            weak_matches_text = "\n\n**🔍 Other Potential Roles (Weak Match):**\n"
-            # Limit to 10 to avoid Discord message length limits
-            for job in weak_matches[:10]:
-                weak_matches_text += f"• {job.title} @ {job.company} - [View Job]({job.url})\n"
+            # Group weak matches by source
+            weak_by_source = {}
+            for job in weak_matches:
+                source = job.source
+                if source not in weak_by_source:
+                    weak_by_source[source] = []
+                weak_by_source[source].append(job)
+            
+            embed = {
+                "title": "🔍 Other Potential Roles",
+                "description": f"**{len(weak_matches)}** weak match(es) - review manually",
+                "color": 9807270,  # Grey
+                "fields": []
+            }
+            
+            # Show up to 6 weak matches (condensed format)
+            for job in weak_matches[:6]:
+                embed["fields"].append({
+                    "name": f"{job.title}",
+                    "value": f"🏢 {job.company} | 🔗 [View]({job.url}) | 📍 {job.source}",
+                    "inline": True
+                })
+            embeds.append(embed)
         
-        # Main message with version number
+        # Main message header
         content_text = f"🤖 **Bot Version: {BOT_VERSION}**\n"
-        content_text += f"📊 **Daily Job Scraper Report** - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-        content_text += f"Found {len(perfect_matches)} perfect matches, {len(good_matches)} good matches, {len(weak_matches)} weak matches"
+        content_text += f"📊 **Daily Job Scraper Report** - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        content_text += f"**Summary:**\n"
+        content_text += f"🥇 Perfect: {len(perfect_matches)} | "
+        content_text += f"🥈 Good: {len(good_matches)} | "
+        content_text += f"🔍 Weak: {len(weak_matches)}"
         if telegram_jobs:
-            content_text += f", {len(telegram_jobs)} Telegram finds"
-        content_text += weak_matches_text
+            content_text += f" | 📱 Telegram: {len(telegram_jobs)}"
+        
+        # If there are more weak matches, mention them
+        if len(weak_matches) > 6:
+            content_text += f"\n\n*Showing top 6 weak matches. {len(weak_matches) - 6} more available in logs.*"
         
         payload = {
             "content": content_text,
@@ -968,6 +1186,7 @@ class DiscordNotifier:
             logger.info(f"Successfully sent {len(jobs)} jobs to Discord")
         except Exception as e:
             logger.error(f"Error sending to Discord: {e}")
+            raise
 
 
 async def scrape_all_jobs() -> List[Job]:
@@ -977,6 +1196,7 @@ async def scrape_all_jobs() -> List[Job]:
         Web3CareerScraper(),
         CryptoJobsListScraper(),
         CryptocurrencyJobsScraper(),
+        DelphiVenturesScraper(),
         TelegramScraper()
     ]
     
@@ -992,31 +1212,88 @@ async def scrape_all_jobs() -> List[Job]:
     return all_jobs
 
 
-def load_seen_jobs() -> set:
-    """Load seen job URLs from file"""
+def normalize_url(url: str) -> str:
+    """Normalize URL for deduplication (remove query params, fragments, trailing slashes)"""
+    try:
+        parsed = urlparse(url)
+        # Remove query params and fragments
+        normalized = urlunparse((
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path.rstrip('/'),  # Remove trailing slash
+            '',  # params
+            '',  # query
+            ''   # fragment
+        ))
+        return normalized.lower()
+    except Exception:
+        return url.lower()
+
+
+def normalize_title(title: str) -> str:
+    """Normalize job title for deduplication"""
+    # Remove extra whitespace, convert to lowercase, remove special chars
+    normalized = re.sub(r'\s+', ' ', title.lower().strip())
+    # Remove common variations
+    normalized = re.sub(r'\s*@\s*unknown\s*', '', normalized)
+    normalized = re.sub(r'\s*\(.*?\)\s*', '', normalized)  # Remove parentheses content
+    normalized = re.sub(r'[^\w\s]', '', normalized)  # Remove special chars
+    return normalized.strip()
+
+
+def load_seen_jobs() -> Tuple[Set[str], Set[str]]:
+    """Load seen job URLs and titles from file
+    
+    Returns:
+        tuple: (seen_urls_set, seen_titles_set)
+    """
     seen_jobs_file = 'seen_jobs.json'
+    seen_urls = set()
+    seen_titles = set()
+    
     try:
         if os.path.exists(seen_jobs_file):
             with open(seen_jobs_file, 'r') as f:
-                seen_urls = json.load(f)
-                logger.info(f"Loaded {len(seen_urls)} seen job URLs from memory")
-                return set(seen_urls)
+                data = json.load(f)
+                
+                # Handle both old format (list of URLs) and new format (dict)
+                if isinstance(data, list):
+                    # Old format: just URLs
+                    seen_urls = {normalize_url(url) for url in data}
+                elif isinstance(data, dict):
+                    # New format: {urls: [...], titles: [...]}
+                    seen_urls = {normalize_url(url) for url in data.get('urls', [])}
+                    seen_titles = {normalize_title(title) for title in data.get('titles', [])}
+                
+                logger.info(f"Loaded {len(seen_urls)} seen URLs and {len(seen_titles)} seen titles from memory")
     except Exception as e:
         logger.warning(f"Error loading seen_jobs.json: {e}")
-    return set()
+    
+    return seen_urls, seen_titles
 
 
-def save_seen_jobs(seen_urls: set):
-    """Save seen job URLs to file (atomic operation to prevent race conditions)"""
+def save_seen_jobs(seen_urls: Set[str], seen_titles: Set[str]):
+    """Save seen job URLs and titles to file (atomic operation to prevent race conditions)"""
     seen_jobs_file = 'seen_jobs.json'
     temp_file = 'seen_jobs.json.tmp'
     max_retries = 3
+    
+    # Limit size to prevent file from growing too large (keep last 5000)
+    if len(seen_urls) > 5000:
+        seen_urls = set(list(seen_urls)[-5000:])
+    if len(seen_titles) > 5000:
+        seen_titles = set(list(seen_titles)[-5000:])
+    
+    data = {
+        'urls': list(seen_urls),
+        'titles': list(seen_titles)
+    }
     
     for attempt in range(max_retries):
         try:
             # Write to temp file first, then rename (atomic on Unix)
             with open(temp_file, 'w') as f:
-                json.dump(list(seen_urls), f, indent=2)
+                json.dump(data, f, indent=2)
                 f.flush()
                 os.fsync(f.fileno())  # Force write to disk
             
@@ -1028,7 +1305,7 @@ def save_seen_jobs(seen_urls: set):
             else:  # Unix/Linux/Mac
                 os.rename(temp_file, seen_jobs_file)
             
-            logger.info(f"Saved {len(seen_urls)} job URLs to memory")
+            logger.info(f"Saved {len(seen_urls)} URLs and {len(seen_titles)} titles to memory")
             return
         except Exception as e:
             logger.warning(f"Error saving seen_jobs.json (attempt {attempt + 1}/{max_retries}): {e}")
@@ -1185,8 +1462,8 @@ async def run_daily_scrape_async():
         logger.info("Starting daily job scrape...")
         logger.info("=" * 60)
         
-        # Load seen jobs
-        seen_urls = load_seen_jobs()
+        # Load seen jobs (both URLs and titles)
+        seen_urls, seen_titles = load_seen_jobs()
         
         # Scrape all jobs
         jobs = await scrape_all_jobs()
@@ -1196,25 +1473,41 @@ async def run_daily_scrape_async():
         # Filter out blacklisted jobs (already done in parsers, but double-check)
         filtered_jobs = [j for j in jobs if j.priority != JobPriority.BLACKLISTED]
         
-        # Deduplicate: filter out jobs we've already seen
+        # Deduplicate: filter out jobs we've already seen (by URL or title)
         new_jobs = []
         skipped_count = 0
+        skipped_urls = 0
+        skipped_titles = 0
+        
         for job in filtered_jobs:
-            if job.url in seen_urls:
+            normalized_url = normalize_url(job.url)
+            normalized_title = normalize_title(job.title)
+            
+            # Check both URL and title for duplicates
+            if normalized_url in seen_urls:
+                skipped_urls += 1
                 skipped_count += 1
                 continue
+            
+            if normalized_title in seen_titles:
+                skipped_titles += 1
+                skipped_count += 1
+                continue
+            
+            # New job - add to both sets
             new_jobs.append(job)
-            seen_urls.add(job.url)
+            seen_urls.add(normalized_url)
+            seen_titles.add(normalized_title)
         
         if skipped_count > 0:
-            logger.info(f"Skipped {skipped_count} duplicate jobs")
+            logger.info(f"Skipped {skipped_count} duplicate jobs ({skipped_urls} by URL, {skipped_titles} by title)")
         
         logger.info(f"New jobs to send: {len(new_jobs)}")
         
         # Save seen jobs IMMEDIATELY after deduplication (before sending to Discord)
         # This prevents race condition where multiple instances send same jobs
         # Save even if no new jobs (to update the file timestamp)
-        save_seen_jobs(seen_urls)
+        save_seen_jobs(seen_urls, seen_titles)
         
         # Only send to Discord if there are new jobs
         if new_jobs:
