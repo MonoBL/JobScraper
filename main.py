@@ -772,7 +772,8 @@ class DelphiVenturesScraper(JobScraper):
             job_list_selector='[class*="job"], [class*="listing"], article',
             wait_timeout=30000
         )
-        self.search_url = "https://jobs.delphiventures.io/jobs"
+        # Use filtered URL for IT roles only
+        self.search_url = "https://jobs.delphiventures.io/jobs?filter=eyJqb2JfZnVuY3Rpb25zIjpbIklUIl19"
 
     async def scrape(self) -> List[Job]:
         """Scrape Delphi Ventures job board"""
