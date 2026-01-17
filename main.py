@@ -77,18 +77,22 @@ class Job:
 class JobRanker:
     """Ranks jobs based on Nuno's profile"""
     
-    # Perfect Match criteria
+    # Perfect Match criteria - Core role titles (will match with any seniority prefix)
     PERFECT_TITLES = [
-        "junior devops", "sysadmin", "system administrator", "systems administrator",
+        "devops", "devops engineer", "sysadmin", "system administrator", "systems administrator",
         "it systems administrator", "it system administrator", "it administrator",
         "l2 support", "level 2 support", "infrastructure engineer",
         "node operator", "node operations", "site reliability engineer",
-        "sre", "devops engineer", "platform engineer"
+        "sre", "sre engineer", "platform engineer", "cloud engineer",
+        "linux engineer", "linux administrator"
     ]
+    
+    # Seniority prefixes to ignore when matching titles
+    SENIORITY_PREFIXES = ["junior", "mid", "mid-level", "senior", "sr", "lead", "staff", "principal", "chief"]
     PERFECT_KEYWORDS = {
         'linux': ['linux', 'ubuntu', 'debian', 'centos'],
         'scripting': ['python', 'bash', 'shell scripting', 'shell script'],
-        'infrastructure': ['kubernetes', 'docker', 'terraform', 'ansible', 'ci/cd']
+        'infrastructure': ['kubernetes', 'docker', 'terraform', 'ansible', 'ci/cd', 'infrastructure', 'cloud', 'aws', 'gcp', 'azure']
     }
     
     # Good Match criteria
@@ -146,6 +150,17 @@ class JobRanker:
         """Check if text contains any of the keywords"""
         normalized = JobRanker.normalize_text(text)
         return any(keyword.lower() in normalized for keyword in keywords)
+    
+    @staticmethod
+    def strip_seniority(title: str) -> str:
+        """Remove seniority prefixes from job title for better matching"""
+        title_lower = JobRanker.normalize_text(title)
+        for prefix in JobRanker.SENIORITY_PREFIXES:
+            # Remove prefix if it's at the start followed by a space
+            if title_lower.startswith(prefix + " "):
+                title_lower = title_lower[len(prefix) + 1:].strip()
+                break
+        return title_lower
 
     @staticmethod
     def rank_job(title: str, description: str) -> tuple[JobPriority, str]:
@@ -170,21 +185,25 @@ class JobRanker:
             return JobPriority.BLACKLISTED, "Contains blacklisted keyword"
 
         # Check Perfect Match (need title + at least 1 keyword, OR just a strong IT title)
-        has_perfect_title = JobRanker.contains_keywords(title_lower, JobRanker.PERFECT_TITLES)
+        # Strip seniority prefixes for better matching (e.g., "Staff DevOps Engineer" -> "DevOps Engineer")
+        title_stripped = JobRanker.strip_seniority(title_lower)
+        has_perfect_title = JobRanker.contains_keywords(title_stripped, JobRanker.PERFECT_TITLES)
         has_linux = JobRanker.contains_keywords(combined, JobRanker.PERFECT_KEYWORDS['linux'])
         has_scripting = JobRanker.contains_keywords(combined, JobRanker.PERFECT_KEYWORDS['scripting'])
         has_infra = JobRanker.contains_keywords(combined, JobRanker.PERFECT_KEYWORDS['infrastructure'])
 
         keyword_count = sum([has_linux, has_scripting, has_infra])
         
-        # Perfect match: Strong IT title (like "IT Systems Administrator") is enough
+        # Perfect match: Strong IT title (like "IT Systems Administrator", "Staff DevOps Engineer") is enough
         # OR title + technical keywords
         if has_perfect_title:
             if keyword_count >= 1:
                 return JobPriority.PERFECT_MATCH, f"Perfect match: Title + {keyword_count} technical keyword(s)"
-            # Strong IT titles like "IT Systems Administrator" are perfect even without keywords
-            if any(term in title_lower for term in ['system administrator', 'systems administrator', 'sysadmin', 'it administrator']):
-                return JobPriority.PERFECT_MATCH, "Perfect match: Strong IT/Systems Administrator title"
+            # Strong IT/DevOps/SRE/Platform titles are perfect even without keywords
+            strong_titles = ['system administrator', 'systems administrator', 'sysadmin', 'it administrator', 
+                           'devops', 'sre', 'platform engineer', 'cloud engineer', 'infrastructure engineer']
+            if any(term in title_stripped for term in strong_titles):
+                return JobPriority.PERFECT_MATCH, "Perfect match: Strong IT/DevOps/SRE/Platform title"
 
         # Check Good Match (more lenient: title OR keywords)
         has_good_title = JobRanker.contains_keywords(title_lower, JobRanker.GOOD_TITLES)
