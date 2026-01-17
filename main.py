@@ -496,25 +496,66 @@ class JobScraper:
             # Use 'domcontentloaded' instead of 'networkidle' to avoid timeouts
             # Add error handling for download triggers (some sites trigger downloads on load)
             try:
-                await page.goto(url, wait_until='domcontentloaded', timeout=self.wait_timeout)
+                # For Delphi Ventures, use a workaround: fetch with requests first, then set content
+                if "delphiventures" in url.lower():
+                    try:
+                        # Try to fetch the page with requests (doesn't trigger downloads)
+                        import requests as req_lib
+                        headers = {
+                            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                            'Accept-Language': 'en-US,en;q=0.9'
+                        }
+                        response = req_lib.get(url, headers=headers, timeout=15, allow_redirects=True)
+                        if response.status_code == 200:
+                            # Set the HTML content directly in Playwright
+                            await page.set_content(response.text, wait_until='domcontentloaded')
+                            await page.wait_for_timeout(3000)
+                            logger.info(f"Delphi Ventures loaded via requests workaround")
+                        else:
+                            raise Exception(f"HTTP {response.status_code}")
+                    except Exception as req_error:
+                        logger.warning(f"Requests approach failed for Delphi Ventures: {req_error}, trying Playwright...")
+                        # Fallback to Playwright with download handling
+                        await page.goto(url, wait_until='domcontentloaded', timeout=self.wait_timeout)
+                        await page.wait_for_timeout(3000)
+                else:
+                    await page.goto(url, wait_until='domcontentloaded', timeout=self.wait_timeout)
             except Exception as goto_error:
                 error_str = str(goto_error)
                 # If it's a download error, try to continue anyway (page might still have loaded)
                 if "Download" in error_str or "download" in error_str.lower() or "Download is starting" in error_str:
-                    logger.warning(f"Page triggered download for {self.source_name}, but continuing to scrape: {error_str[:100]}")
-                    # Wait a bit and try to get content anyway (page might have loaded before download started)
-                    try:
-                        await page.wait_for_timeout(3000)
-                        # Check if page actually loaded
-                        current_url = page.url
-                        if current_url and current_url != "about:blank":
-                            logger.info(f"Page loaded despite download trigger: {current_url}")
+                    logger.warning(f"Page triggered download for {self.source_name}, checking if content loaded...")
+                    # Wait a bit and check if we can get content
+                    await page.wait_for_timeout(3000)
+                    current_url = page.url
+                    if current_url and current_url != "about:blank" and "chrome-error" not in current_url:
+                        logger.info(f"Page loaded despite download trigger: {current_url}")
+                    else:
+                        logger.warning(f"Page did not load properly for {self.source_name}")
+                        # For Delphi Ventures, try one more time with request blocking
+                        if "delphiventures" in url.lower():
+                            try:
+                                # Create a new page and try again with download blocking
+                                await page.close()
+                                page = await PlaywrightBrowserManager.create_page()
+                                
+                                async def handle_route(route):
+                                    request = route.request
+                                    if request.resource_type == "other" or "download" in request.url.lower():
+                                        await route.abort()
+                                    else:
+                                        await route.continue_()
+                                
+                                await page.route("**/*", handle_route)
+                                await page.goto(url, wait_until='load', timeout=self.wait_timeout)
+                                await page.wait_for_timeout(3000)
+                                logger.info(f"Delphi Ventures loaded successfully on retry")
+                            except Exception as e:
+                                logger.error(f"Delphi Ventures failed on retry: {e}")
+                                return None, None
                         else:
-                            logger.warning(f"Page did not load properly, skipping {self.source_name}")
                             return None, None
-                    except Exception as e:
-                        logger.warning(f"Error waiting after download trigger: {e}")
-                        return None, None
                 else:
                     # Re-raise if it's a different error
                     logger.error(f"Error loading page {url}: {goto_error}")
@@ -1347,8 +1388,20 @@ class DelphiVenturesScraper(JobScraper):
                     path_parts = url_parts[1].split('/')
                     if len(path_parts) > 0:
                         potential_company = path_parts[0].replace('-', ' ').title()
-                        if len(potential_company) < 50:
+                        # Filter out IDs and invalid company names
+                        if len(potential_company) < 50 and not potential_company.isdigit() and '#' not in potential_company:
                             company = potential_company
+            
+            # Clean up company name - remove IDs and invalid patterns
+            if company and company != "Unknown":
+                # Remove patterns like "63861016 Technical Support Engineer#Content"
+                if '#' in company:
+                    company = company.split('#')[0].strip()
+                # Remove leading numbers
+                company = re.sub(r'^\d+\s+', '', company)
+                # If company looks like an ID or invalid, set to Unknown
+                if company.isdigit() or len(company) < 2 or company.lower() == 'unknown':
+                    company = "Unknown"
             
             # Extract description - get more context
             description = ""
