@@ -79,7 +79,8 @@ class JobRanker:
     
     # Perfect Match criteria
     PERFECT_TITLES = [
-        "junior devops", "sysadmin", "system administrator",
+        "junior devops", "sysadmin", "system administrator", "systems administrator",
+        "it systems administrator", "it system administrator", "it administrator",
         "l2 support", "level 2 support", "infrastructure engineer",
         "node operator", "node operations", "site reliability engineer",
         "sre", "devops engineer", "platform engineer"
@@ -94,7 +95,9 @@ class JobRanker:
     GOOD_TITLES = [
         "it support", "technical support", "datacenter technician",
         "it operations", "operations engineer", "support engineer",
-        "customer support engineer", "technical support engineer"
+        "customer support engineer", "technical support engineer",
+        "solutions architect", "systems architect", "technical architect",
+        "infrastructure architect", "cloud architect"
     ]
     GOOD_KEYWORDS = [
         "hardware", "repair", "network", "networking", "tickets",
@@ -166,7 +169,7 @@ class JobRanker:
         if JobRanker.contains_keywords(combined, JobRanker.BLACKLIST_KEYWORDS):
             return JobPriority.BLACKLISTED, "Contains blacklisted keyword"
 
-        # Check Perfect Match (need title + at least 1 keyword)
+        # Check Perfect Match (need title + at least 1 keyword, OR just a strong IT title)
         has_perfect_title = JobRanker.contains_keywords(title_lower, JobRanker.PERFECT_TITLES)
         has_linux = JobRanker.contains_keywords(combined, JobRanker.PERFECT_KEYWORDS['linux'])
         has_scripting = JobRanker.contains_keywords(combined, JobRanker.PERFECT_KEYWORDS['scripting'])
@@ -174,8 +177,14 @@ class JobRanker:
 
         keyword_count = sum([has_linux, has_scripting, has_infra])
         
-        if has_perfect_title and keyword_count >= 1:
-            return JobPriority.PERFECT_MATCH, f"Perfect match: Title + {keyword_count} technical keyword(s)"
+        # Perfect match: Strong IT title (like "IT Systems Administrator") is enough
+        # OR title + technical keywords
+        if has_perfect_title:
+            if keyword_count >= 1:
+                return JobPriority.PERFECT_MATCH, f"Perfect match: Title + {keyword_count} technical keyword(s)"
+            # Strong IT titles like "IT Systems Administrator" are perfect even without keywords
+            if any(term in title_lower for term in ['system administrator', 'systems administrator', 'sysadmin', 'it administrator']):
+                return JobPriority.PERFECT_MATCH, "Perfect match: Strong IT/Systems Administrator title"
 
         # Check Good Match (more lenient: title OR keywords)
         has_good_title = JobRanker.contains_keywords(title_lower, JobRanker.GOOD_TITLES)
@@ -192,15 +201,21 @@ class JobRanker:
 
         # Weak Match: Only include jobs with clear technical/IT relevance
         # Must have at least one strong technical keyword
+        # Exclude creative/art roles that aren't IT-related
         technical_keywords = ['support', 'operations', 'infrastructure', 'linux', 'python', 'devops', 
-                             'technical', 'engineer', 'developer', 'admin', 'sysadmin', 'it', 
+                             'engineer', 'developer', 'admin', 'sysadmin', 'it', 
                              'network', 'server', 'cloud', 'kubernetes', 'docker', 'monitoring',
                              'systems', 'platform', 'backend', 'frontend', 'sre', 'sre engineer',
                              'site reliability', 'infrastructure engineer', 'technical support']
         
+        # Exclude creative/art roles from technical keywords
+        creative_roles = ['artist', 'designer', 'illustrator', 'animator', 'creative', 'ui/ux designer']
+        has_creative_role = any(role in title_lower for role in creative_roles)
+        
         has_technical = any(kw in combined for kw in technical_keywords)
         
-        if has_technical:
+        # Only weak match if it's technical AND not a creative role
+        if has_technical and not has_creative_role:
             return JobPriority.WEAK_MATCH, "Weak match: Some technical relevance"
         
         # Only show crypto/web3 jobs if they have some technical aspect
