@@ -1693,7 +1693,7 @@ class DiscordNotifier:
                 embeds.append(embed)
         
         # Weak matches: Use text format instead of embeds to avoid size limits
-        # Split into main message and follow-up messages if needed
+        # Show first batch in main message, save remaining for 9:30 AM message
         weak_matches_text = ""
         remaining_weak_matches = []
         if weak_matches:
@@ -1709,10 +1709,14 @@ class DiscordNotifier:
                 if len(weak_matches_text) + len(line) > 1800:
                     remaining_weak_matches = weak_matches[shown_count:]
                     remaining = len(remaining_weak_matches)
-                    weak_matches_text += f"\n*... and {remaining} more weak matches (see next message)*"
+                    weak_matches_text += f"\n*... and {remaining} more weak matches (will be sent at 9:30 AM)*"
                     break
                 weak_matches_text += line
                 shown_count += 1
+            
+            # Save remaining weak matches to file for 9:30 AM message
+            if remaining_weak_matches:
+                save_remaining_weak_matches(remaining_weak_matches)
         
         # Discord has a limit of 10 embeds per message and 2000 chars for content
         # Split into multiple messages if needed
@@ -1762,49 +1766,9 @@ class DiscordNotifier:
                 logger.error(f"Unexpected error sending message {msg_idx + 1} to Discord: {e}", exc_info=True)
                 raise
         
-        # Send follow-up message with remaining weak matches if any
-        follow_up_count = 0
+        logger.info(f"Successfully sent main message with {len(jobs)} jobs to Discord in {len(embed_chunks)} message(s)")
         if remaining_weak_matches:
-            # Split remaining weak matches into chunks (Discord content limit is 2000 chars)
-            remaining_chunks = []
-            current_chunk = f"**🔍 Remaining Weak Matches ({len(remaining_weak_matches)} total):**\n\n"
-            
-            for job in remaining_weak_matches:
-                title = job.title[:80] + "..." if len(job.title) > 80 else job.title
-                company = job.company[:30] + "..." if len(job.company) > 30 else job.company
-                line = f"• {title} @ {company} - [View]({job.url})\n"
-                
-                # If adding this line would exceed limit, start a new chunk
-                if len(current_chunk) + len(line) > 1900:
-                    remaining_chunks.append(current_chunk)
-                    current_chunk = f"**🔍 Weak Matches (continued):**\n\n{line}"
-                else:
-                    current_chunk += line
-            
-            # Add the last chunk if it has content
-            if current_chunk and len(current_chunk) > len(f"**🔍 Remaining Weak Matches ({len(remaining_weak_matches)} total):**\n\n"):
-                remaining_chunks.append(current_chunk)
-            
-            # Send each chunk as a separate message
-            for chunk_idx, chunk_text in enumerate(remaining_chunks):
-                try:
-                    payload = {
-                        "content": chunk_text + (f"\n*Part {chunk_idx + 1} of {len(remaining_chunks)}*" if len(remaining_chunks) > 1 else ""),
-                        "embeds": []
-                    }
-                    response = requests.post(self.webhook_url, json=payload, timeout=30)
-                    response.raise_for_status()
-                    logger.info(f"Successfully sent follow-up message {chunk_idx + 1}/{len(remaining_chunks)} with remaining weak matches (HTTP {response.status_code})")
-                    follow_up_count += 1
-                    # Small delay between messages
-                    if chunk_idx < len(remaining_chunks) - 1:
-                        import time
-                        time.sleep(1)
-                except Exception as e:
-                    logger.error(f"Error sending follow-up message with weak matches: {e}")
-        
-        total_messages = len(embed_chunks) + follow_up_count
-        logger.info(f"Successfully sent all {len(jobs)} jobs to Discord in {total_messages} message(s)")
+            logger.info(f"Saved {len(remaining_weak_matches)} remaining weak matches for 9:30 AM message")
 
 
 async def scrape_all_jobs() -> List[Job]:
@@ -1888,6 +1852,110 @@ def load_seen_jobs() -> Tuple[Set[str], Set[str]]:
         logger.warning(f"Error loading seen_jobs.json: {e}")
     
     return seen_urls, seen_titles
+
+
+def save_remaining_weak_matches(remaining_jobs: List[Job]):
+    """Save remaining weak matches to file for 9:30 AM message"""
+    remaining_file = 'remaining_weak_matches.json'
+    try:
+        jobs_data = [job.to_dict() for job in remaining_jobs]
+        with open(remaining_file, 'w') as f:
+            json.dump(jobs_data, f, indent=2)
+        logger.info(f"Saved {len(remaining_jobs)} remaining weak matches to {remaining_file}")
+    except Exception as e:
+        logger.error(f"Error saving remaining weak matches: {e}")
+
+
+def load_remaining_weak_matches() -> List[Job]:
+    """Load remaining weak matches from file"""
+    remaining_file = 'remaining_weak_matches.json'
+    jobs = []
+    try:
+        if os.path.exists(remaining_file):
+            with open(remaining_file, 'r') as f:
+                jobs_data = json.load(f)
+                for job_data in jobs_data:
+                    job = Job(
+                        title=job_data['title'],
+                        company=job_data['company'],
+                        url=job_data['url'],
+                        description=job_data['description'],
+                        source=job_data['source'],
+                        priority=JobPriority[job_data['priority']],
+                        priority_reason=job_data['priority_reason'],
+                        posted_date=job_data.get('posted_date')
+                    )
+                    jobs.append(job)
+            logger.info(f"Loaded {len(jobs)} remaining weak matches from {remaining_file}")
+    except Exception as e:
+        logger.warning(f"Error loading remaining weak matches: {e}")
+    return jobs
+
+
+def send_remaining_weak_matches():
+    """Send remaining weak matches at 9:30 AM"""
+    webhook_url = os.getenv('DISCORD_WEBHOOK_URL')
+    if not webhook_url:
+        logger.warning("DISCORD_WEBHOOK_URL not set. Cannot send remaining weak matches.")
+        return
+    
+    remaining_jobs = load_remaining_weak_matches()
+    if not remaining_jobs:
+        logger.info("No remaining weak matches to send")
+        return
+    
+    try:
+        # Build message with divider
+        content_text = "------\n"
+        content_text += f"**🔍 Remaining Weak Matches ({len(remaining_jobs)} jobs):**\n\n"
+        
+        # Split into chunks if needed (Discord content limit is 2000 chars)
+        chunks = []
+        current_chunk = content_text
+        
+        for job in remaining_jobs:
+            title = job.title[:80] + "..." if len(job.title) > 80 else job.title
+            company = job.company[:30] + "..." if len(job.company) > 30 else job.company
+            line = f"• {title} @ {company} - [View]({job.url})\n"
+            
+            # If adding this line would exceed limit, start a new chunk
+            if len(current_chunk) + len(line) > 1900:
+                chunks.append(current_chunk)
+                current_chunk = "------\n**🔍 Weak Matches (continued):**\n\n" + line
+            else:
+                current_chunk += line
+        
+        # Add the last chunk if it has content
+        if current_chunk and len(current_chunk) > len(content_text):
+            chunks.append(current_chunk)
+        
+        # Send each chunk as a separate message
+        for chunk_idx, chunk_text in enumerate(chunks):
+            try:
+                payload = {
+                    "content": chunk_text + (f"\n*Part {chunk_idx + 1} of {len(chunks)}*" if len(chunks) > 1 else ""),
+                    "embeds": []
+                }
+                response = requests.post(webhook_url, json=payload, timeout=30)
+                response.raise_for_status()
+                logger.info(f"Successfully sent remaining weak matches message {chunk_idx + 1}/{len(chunks)} (HTTP {response.status_code})")
+                # Small delay between messages
+                if chunk_idx < len(chunks) - 1:
+                    time.sleep(1)
+            except Exception as e:
+                logger.error(f"Error sending remaining weak matches message {chunk_idx + 1}: {e}")
+        
+        # Delete the file after sending
+        remaining_file = 'remaining_weak_matches.json'
+        try:
+            if os.path.exists(remaining_file):
+                os.remove(remaining_file)
+                logger.info(f"Deleted {remaining_file} after sending")
+        except Exception as e:
+            logger.warning(f"Error deleting {remaining_file}: {e}")
+            
+    except Exception as e:
+        logger.error(f"Error sending remaining weak matches: {e}")
 
 
 def save_seen_jobs(seen_urls: Set[str], seen_titles: Set[str]):
@@ -2197,8 +2265,11 @@ def main():
         
         # Schedule daily runs at 9:00 AM
         schedule.every().day.at("09:00").do(run_daily_scrape)
+        # Schedule remaining weak matches at 9:30 AM
+        schedule.every().day.at("09:30").do(send_remaining_weak_matches)
         
         logger.info("Job scraper started. Will run daily at 09:00 AM")
+        logger.info("Remaining weak matches will be sent at 09:30 AM")
         logger.info("Press Ctrl+C to stop")
         
         # Keep the script running
