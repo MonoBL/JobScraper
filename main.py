@@ -1724,7 +1724,7 @@ class DiscordNotifier:
                 if len(weak_matches_text) + len(line) > 1800:
                     remaining_weak_matches = weak_matches[shown_count:]
                     remaining = len(remaining_weak_matches)
-                    weak_matches_text += f"\n*... and {remaining} more weak matches (will be sent at 9:30 AM)*"
+                    weak_matches_text += f"\n*... and {remaining} more weak matches (will be sent at 9:05 AM)*"
                     break
                 weak_matches_text += line
                 shown_count += 1
@@ -1908,7 +1908,7 @@ def load_remaining_weak_matches() -> List[Job]:
 
 
 def send_remaining_weak_matches():
-    """Send remaining weak matches at 9:30 AM"""
+    """Send remaining weak matches at 9:05 AM"""
     webhook_url = os.getenv('DISCORD_WEBHOOK_URL')
     if not webhook_url:
         logger.warning("DISCORD_WEBHOOK_URL not set. Cannot send remaining weak matches.")
@@ -2280,11 +2280,11 @@ def main():
         
         # Schedule daily runs at 9:00 AM
         schedule.every().day.at("09:00").do(run_daily_scrape)
-        # Schedule remaining weak matches at 9:30 AM
-        schedule.every().day.at("09:30").do(send_remaining_weak_matches)
+        # Schedule remaining weak matches at 9:05 AM
+        schedule.every().day.at("09:05").do(send_remaining_weak_matches)
         
         logger.info("Job scraper started. Will run daily at 09:00 AM")
-        logger.info("Remaining weak matches will be sent at 09:30 AM")
+        logger.info("Remaining weak matches will be sent at 09:05 AM")
         logger.info("Press Ctrl+C to stop")
         
         # Keep the script running
