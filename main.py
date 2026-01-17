@@ -1631,115 +1631,135 @@ class DiscordNotifier:
         
         # Embed 1: Perfect Matches (separate for visibility)
         if perfect_matches:
-            embed = {
-                "title": "🥇 Perfect Matches",
-                "description": f"**{len(perfect_matches)}** perfect match(es) found!",
-                "color": 3066993,  # Green
-                "fields": []
-            }
-            for job in perfect_matches[:8]:  # Limit to 8 for readability
-                embed["fields"].append({
-                    "name": f"**{job.title}**",
-                    "value": f"🏢 {job.company}\n📝 {job.priority_reason}\n🔗 [View Job]({job.url})\n📍 *{job.source}*",
-                    "inline": False
-                })
-            embeds.append(embed)
-        
-        # Embed 2: Good Matches
-        if good_matches:
-            embed = {
-                "title": "🥈 Good Matches",
-                "description": f"**{len(good_matches)}** good match(es) found",
-                "color": 15844367,  # Gold
-                "fields": []
-            }
-            for job in good_matches[:8]:  # Limit to 8
-                embed["fields"].append({
-                    "name": f"**{job.title}**",
-                    "value": f"🏢 {job.company}\n📝 {job.priority_reason}\n🔗 [View Job]({job.url})\n📍 *{job.source}*",
-                    "inline": False
-                })
-            embeds.append(embed)
-        
-        # Embed 3: Telegram Finds (grouped by channel)
-        if telegram_jobs:
-            telegram_by_channel = {}
-            for job in telegram_jobs:
-                channel = job.source
-                if channel not in telegram_by_channel:
-                    telegram_by_channel[channel] = []
-                telegram_by_channel[channel].append(job)
-            
-            embed = {
-                "title": "📱 Telegram Finds",
-                "description": f"**{len(telegram_jobs)}** job(s) from Telegram channels",
-                "color": 3447003,  # Blue
-                "fields": []
-            }
-            for job in telegram_jobs[:8]:  # Limit to 8
-                embed["fields"].append({
-                    "name": f"**{job.title}**",
-                    "value": f"🏢 {job.company}\n🔗 [View Message]({job.url})\n📍 *{job.source}*",
-                    "inline": False
-                })
-            embeds.append(embed)
-        
-        # Embed 4: Weak Matches - Show ALL jobs (split into multiple embeds if needed)
-        if weak_matches:
-            # Discord limit: 25 fields per embed, 6000 chars per embed
-            # Split weak matches into chunks of 20 to stay safe
-            chunk_size = 20
-            weak_chunks = [weak_matches[i:i + chunk_size] for i in range(0, len(weak_matches), chunk_size)]
-            
-            for chunk_idx, chunk in enumerate(weak_chunks):
+            # Split perfect matches into chunks if too many
+            perfect_chunks = [perfect_matches[i:i + 8] for i in range(0, len(perfect_matches), 8)]
+            for chunk_idx, chunk in enumerate(perfect_chunks):
                 embed = {
-                    "title": f"🔍 Other Potential Roles" + (f" (Part {chunk_idx + 1})" if len(weak_chunks) > 1 else ""),
-                    "description": f"**{len(weak_matches)}** weak match(es) total - review manually" + (f" (showing {len(chunk)} of {len(weak_matches)})" if len(weak_chunks) > 1 else ""),
-                    "color": 9807270,  # Grey
+                    "title": "🥇 Perfect Matches" + (f" (Part {chunk_idx + 1})" if len(perfect_chunks) > 1 else ""),
+                    "description": f"**{len(perfect_matches)}** perfect match(es) found!" + (f" - Part {chunk_idx + 1} of {len(perfect_chunks)}" if len(perfect_chunks) > 1 else ""),
+                    "color": 3066993,  # Green
                     "fields": []
                 }
-                
-                # Show all weak matches in this chunk
                 for job in chunk:
+                    # More compact format
+                    title = job.title[:80] + "..." if len(job.title) > 80 else job.title
                     embed["fields"].append({
-                        "name": f"{job.title}",
-                        "value": f"🏢 {job.company} | 🔗 [View]({job.url}) | 📍 {job.source}",
-                        "inline": True
+                        "name": f"**{title}**",
+                        "value": f"🏢 {job.company}\n🔗 [View Job]({job.url})\n📍 {job.source}",
+                        "inline": False
                     })
                 embeds.append(embed)
         
-        # Main message header
-        content_text = f"🤖 **Bot Version: {BOT_VERSION}**\n"
-        content_text += f"📊 **Daily Job Scraper Report** - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-        content_text += f"**Summary:**\n"
-        content_text += f"🥇 Perfect: {len(perfect_matches)} | "
-        content_text += f"🥈 Good: {len(good_matches)} | "
-        content_text += f"🔍 Weak: {len(weak_matches)}"
+        # Embed 2: Good Matches
+        if good_matches:
+            # Split good matches into chunks if too many
+            good_chunks = [good_matches[i:i + 8] for i in range(0, len(good_matches), 8)]
+            for chunk_idx, chunk in enumerate(good_chunks):
+                embed = {
+                    "title": "🥈 Good Matches" + (f" (Part {chunk_idx + 1})" if len(good_chunks) > 1 else ""),
+                    "description": f"**{len(good_matches)}** good match(es) found" + (f" - Part {chunk_idx + 1} of {len(good_chunks)}" if len(good_chunks) > 1 else ""),
+                    "color": 15844367,  # Gold
+                    "fields": []
+                }
+                for job in chunk:
+                    # More compact format
+                    title = job.title[:80] + "..." if len(job.title) > 80 else job.title
+                    embed["fields"].append({
+                        "name": f"**{title}**",
+                        "value": f"🏢 {job.company}\n🔗 [View Job]({job.url})\n📍 {job.source}",
+                        "inline": False
+                    })
+                embeds.append(embed)
+        
+        # Embed 3: Telegram Finds (grouped by channel)
         if telegram_jobs:
-            content_text += f" | 📱 Telegram: {len(telegram_jobs)}"
+            # Split Telegram jobs into chunks if too many
+            telegram_chunks = [telegram_jobs[i:i + 10] for i in range(0, len(telegram_jobs), 10)]
+            for chunk_idx, chunk in enumerate(telegram_chunks):
+                embed = {
+                    "title": "📱 Telegram Finds" + (f" (Part {chunk_idx + 1})" if len(telegram_chunks) > 1 else ""),
+                    "description": f"**{len(telegram_jobs)}** job(s) from Telegram" + (f" - Part {chunk_idx + 1} of {len(telegram_chunks)}" if len(telegram_chunks) > 1 else ""),
+                    "color": 3447003,  # Blue
+                    "fields": []
+                }
+                for job in chunk:
+                    # More compact format, truncate long titles
+                    title = job.title[:70] + "..." if len(job.title) > 70 else job.title
+                    embed["fields"].append({
+                        "name": title,
+                        "value": f"[View]({job.url})",
+                        "inline": False
+                    })
+                embeds.append(embed)
         
-        # Note about showing all jobs
-        if len(weak_matches) > 0:
-            content_text += f"\n\n*All {len(weak_matches)} weak matches shown below.*"
+        # Weak matches: Use text format instead of embeds to avoid size limits
+        weak_matches_text = ""
+        if weak_matches:
+            weak_matches_text = f"\n\n**🔍 Other Potential Roles ({len(weak_matches)} weak matches):**\n"
+            # Show all weak matches as a simple text list
+            # Limit to first 30 to stay under 2000 char limit for content
+            shown_count = 0
+            for job in weak_matches:
+                title = job.title[:80] + "..." if len(job.title) > 80 else job.title
+                company = job.company[:30] + "..." if len(job.company) > 30 else job.company
+                line = f"• {title} @ {company} - [View]({job.url})\n"
+                # Check if adding this line would exceed limit
+                if len(weak_matches_text) + len(line) > 1800:
+                    remaining = len(weak_matches) - shown_count
+                    weak_matches_text += f"\n*... and {remaining} more weak matches (see logs for full list)*"
+                    break
+                weak_matches_text += line
+                shown_count += 1
         
-        payload = {
-            "content": content_text,
-            "embeds": embeds
-        }
+        # Discord has a limit of 10 embeds per message and 2000 chars for content
+        # Split into multiple messages if needed
+        max_embeds_per_message = 10
+        embed_chunks = [embeds[i:i + max_embeds_per_message] for i in range(0, len(embeds), max_embeds_per_message)]
         
-        try:
-            logger.debug(f"Sending payload to Discord webhook (embeds: {len(embeds)}, jobs: {len(jobs)})")
-            response = requests.post(self.webhook_url, json=payload, timeout=30)
-            response.raise_for_status()
-            logger.info(f"Successfully sent {len(jobs)} jobs to Discord (HTTP {response.status_code})")
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Error sending to Discord: {e}")
-            if hasattr(e, 'response') and e.response is not None:
-                logger.error(f"Discord API response: {e.response.status_code} - {e.response.text[:500]}")
-            raise
-        except Exception as e:
-            logger.error(f"Unexpected error sending to Discord: {e}", exc_info=True)
-            raise
+        for msg_idx, embed_chunk in enumerate(embed_chunks):
+            # Main message header (only on first message)
+            if msg_idx == 0:
+                content_text = f"🤖 **Bot Version: {BOT_VERSION}**\n"
+                content_text += f"📊 **Daily Job Scraper Report** - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                content_text += f"**Summary:**\n"
+                content_text += f"🥇 Perfect: {len(perfect_matches)} | "
+                content_text += f"🥈 Good: {len(good_matches)} | "
+                content_text += f"🔍 Weak: {len(weak_matches)}"
+                if telegram_jobs:
+                    content_text += f" | 📱 Telegram: {len(telegram_jobs)}"
+                
+                # Add weak matches as text (only in first message)
+                content_text += weak_matches_text
+                
+                if len(embed_chunks) > 1:
+                    content_text += f"\n\n*Message {msg_idx + 1} of {len(embed_chunks)}*"
+            else:
+                content_text = f"*Continued... (Message {msg_idx + 1} of {len(embed_chunks)})*"
+            
+            payload = {
+                "content": content_text,
+                "embeds": embed_chunk
+            }
+            
+            try:
+                logger.debug(f"Sending message {msg_idx + 1}/{len(embed_chunks)} to Discord (embeds: {len(embed_chunk)})")
+                response = requests.post(self.webhook_url, json=payload, timeout=30)
+                response.raise_for_status()
+                logger.info(f"Successfully sent message {msg_idx + 1}/{len(embed_chunks)} to Discord (HTTP {response.status_code})")
+                # Small delay between messages to avoid rate limiting
+                if msg_idx < len(embed_chunks) - 1:
+                    import time
+                    time.sleep(1)
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Error sending message {msg_idx + 1} to Discord: {e}")
+                if hasattr(e, 'response') and e.response is not None:
+                    logger.error(f"Discord API response: {e.response.status_code} - {e.response.text[:500]}")
+                raise
+            except Exception as e:
+                logger.error(f"Unexpected error sending message {msg_idx + 1} to Discord: {e}", exc_info=True)
+                raise
+        
+        logger.info(f"Successfully sent all {len(jobs)} jobs to Discord in {len(embed_chunks)} message(s)")
 
 
 async def scrape_all_jobs() -> List[Job]:
