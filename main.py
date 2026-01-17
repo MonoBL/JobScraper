@@ -1729,7 +1729,7 @@ class DiscordNotifier:
                 weak_matches_text += line
                 shown_count += 1
             
-            # Save remaining weak matches to file for 9:30 AM message
+            # Save remaining weak matches to file for 9:05 AM message
             if remaining_weak_matches:
                 save_remaining_weak_matches(remaining_weak_matches)
         
@@ -1783,7 +1783,7 @@ class DiscordNotifier:
         
         logger.info(f"Successfully sent main message with {len(jobs)} jobs to Discord in {len(embed_chunks)} message(s)")
         if remaining_weak_matches:
-            logger.info(f"Saved {len(remaining_weak_matches)} remaining weak matches for 9:30 AM message")
+                logger.info(f"Saved {len(remaining_weak_matches)} remaining weak matches for 9:05 AM message")
 
 
 async def scrape_all_jobs() -> List[Job]:
@@ -1870,7 +1870,7 @@ def load_seen_jobs() -> Tuple[Set[str], Set[str]]:
 
 
 def save_remaining_weak_matches(remaining_jobs: List[Job]):
-    """Save remaining weak matches to file for 9:30 AM message"""
+    """Save remaining weak matches to file for 9:05 AM message"""
     remaining_file = 'remaining_weak_matches.json'
     try:
         jobs_data = [job.to_dict() for job in remaining_jobs]
