@@ -1693,11 +1693,13 @@ class DiscordNotifier:
                 embeds.append(embed)
         
         # Weak matches: Use text format instead of embeds to avoid size limits
+        # Split into main message and follow-up messages if needed
         weak_matches_text = ""
+        remaining_weak_matches = []
         if weak_matches:
             weak_matches_text = f"\n\n**🔍 Other Potential Roles ({len(weak_matches)} weak matches):**\n"
-            # Show all weak matches as a simple text list
-            # Limit to first 30 to stay under 2000 char limit for content
+            # Show first batch of weak matches in main message
+            # Limit to first 20 to stay under 2000 char limit for content
             shown_count = 0
             for job in weak_matches:
                 title = job.title[:80] + "..." if len(job.title) > 80 else job.title
@@ -1705,8 +1707,9 @@ class DiscordNotifier:
                 line = f"• {title} @ {company} - [View]({job.url})\n"
                 # Check if adding this line would exceed limit
                 if len(weak_matches_text) + len(line) > 1800:
-                    remaining = len(weak_matches) - shown_count
-                    weak_matches_text += f"\n*... and {remaining} more weak matches (see logs for full list)*"
+                    remaining_weak_matches = weak_matches[shown_count:]
+                    remaining = len(remaining_weak_matches)
+                    weak_matches_text += f"\n*... and {remaining} more weak matches (see next message)*"
                     break
                 weak_matches_text += line
                 shown_count += 1
@@ -1759,7 +1762,49 @@ class DiscordNotifier:
                 logger.error(f"Unexpected error sending message {msg_idx + 1} to Discord: {e}", exc_info=True)
                 raise
         
-        logger.info(f"Successfully sent all {len(jobs)} jobs to Discord in {len(embed_chunks)} message(s)")
+        # Send follow-up message with remaining weak matches if any
+        follow_up_count = 0
+        if remaining_weak_matches:
+            # Split remaining weak matches into chunks (Discord content limit is 2000 chars)
+            remaining_chunks = []
+            current_chunk = f"**🔍 Remaining Weak Matches ({len(remaining_weak_matches)} total):**\n\n"
+            
+            for job in remaining_weak_matches:
+                title = job.title[:80] + "..." if len(job.title) > 80 else job.title
+                company = job.company[:30] + "..." if len(job.company) > 30 else job.company
+                line = f"• {title} @ {company} - [View]({job.url})\n"
+                
+                # If adding this line would exceed limit, start a new chunk
+                if len(current_chunk) + len(line) > 1900:
+                    remaining_chunks.append(current_chunk)
+                    current_chunk = f"**🔍 Weak Matches (continued):**\n\n{line}"
+                else:
+                    current_chunk += line
+            
+            # Add the last chunk if it has content
+            if current_chunk and len(current_chunk) > len(f"**🔍 Remaining Weak Matches ({len(remaining_weak_matches)} total):**\n\n"):
+                remaining_chunks.append(current_chunk)
+            
+            # Send each chunk as a separate message
+            for chunk_idx, chunk_text in enumerate(remaining_chunks):
+                try:
+                    payload = {
+                        "content": chunk_text + (f"\n*Part {chunk_idx + 1} of {len(remaining_chunks)}*" if len(remaining_chunks) > 1 else ""),
+                        "embeds": []
+                    }
+                    response = requests.post(self.webhook_url, json=payload, timeout=30)
+                    response.raise_for_status()
+                    logger.info(f"Successfully sent follow-up message {chunk_idx + 1}/{len(remaining_chunks)} with remaining weak matches (HTTP {response.status_code})")
+                    follow_up_count += 1
+                    # Small delay between messages
+                    if chunk_idx < len(remaining_chunks) - 1:
+                        import time
+                        time.sleep(1)
+                except Exception as e:
+                    logger.error(f"Error sending follow-up message with weak matches: {e}")
+        
+        total_messages = len(embed_chunks) + follow_up_count
+        logger.info(f"Successfully sent all {len(jobs)} jobs to Discord in {total_messages} message(s)")
 
 
 async def scrape_all_jobs() -> List[Job]:
