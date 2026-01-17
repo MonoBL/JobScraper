@@ -102,26 +102,35 @@ class JobRanker:
         "troubleshooting", "monitoring", "alerting", "incident response"
     ]
     
-    # Blacklist - only filter out clearly irrelevant roles (less strict)
+    # Blacklist - filter out non-IT roles more strictly
     BLACKLIST_TITLES = [
         "senior solidity developer", "marketing manager", "sales manager",
         "hr manager", "human resources manager", "legal counsel", "lawyer", "attorney",
         "cfo", "cto", "founder", "co-founder", "product manager", "product owner",
         "ui/ux designer", "content writer", "copywriter", "community manager",
-        "social media manager", "influencer", "accountant", "finance manager"
+        "social media manager", "influencer", "accountant", "finance manager",
+        "affiliate manager", "business development", "bd manager", "legal admin",
+        "senior associate", "analyst", "client insights", "sales analytics",
+        "product control", "business operations", "strategy manager", "operations manager",
+        "internal audit", "professional practices", "compliance", "regulatory"
     ]
     BLACKLIST_KEYWORDS = [
         "senior solidity", "marketing manager", "sales manager",
         "hr manager", "legal counsel", "10+ years experience", "15+ years",
-        "phd required", "masters required", "bachelor's degree required"
+        "phd required", "masters required", "bachelor's degree required",
+        "affiliate", "business development", "bd", "legal", "compliance",
+        "audit", "accounting", "finance", "analyst", "sales analytics",
+        "client insights", "product control", "strategy", "operations manager"
     ]
     
-    # Additional filter: only filter out clearly irrelevant patterns (less strict)
+    # Additional filter: filter out clearly non-IT patterns
     IRRELEVANT_PATTERNS = [
         r'\b(chief|founder|co-founder|cto|ceo|cfo)\s+\w+',
         r'\b(15|20)\+?\s*years?\s+experience',
         r'\b(phd|masters?)\s+required',
-        r'\b(marketing|sales|legal|finance|accounting)\s+manager',
+        r'\b(marketing|sales|legal|finance|accounting|compliance|audit|regulatory)\s+\w+',
+        r'\b(affiliate|business development|bd)\s+\w+',
+        r'\b(senior associate|analyst|insights|analytics)\s+\w+',
     ]
 
     @staticmethod
@@ -181,18 +190,29 @@ class JobRanker:
         if keyword_count >= 1:
             return JobPriority.GOOD_MATCH, f"Good match: Technical keywords found ({keyword_count})"
 
-        # Weak Match: More lenient - include jobs with any technical or support relevance
-        if any(kw in combined for kw in ['support', 'operations', 'infrastructure', 'linux', 'python', 'devops', 
-                                         'technical', 'engineer', 'developer', 'admin', 'sysadmin', 'it', 
-                                         'network', 'server', 'cloud', 'kubernetes', 'docker', 'monitoring']):
+        # Weak Match: Only include jobs with clear technical/IT relevance
+        # Must have at least one strong technical keyword
+        technical_keywords = ['support', 'operations', 'infrastructure', 'linux', 'python', 'devops', 
+                             'technical', 'engineer', 'developer', 'admin', 'sysadmin', 'it', 
+                             'network', 'server', 'cloud', 'kubernetes', 'docker', 'monitoring',
+                             'systems', 'platform', 'backend', 'frontend', 'sre', 'sre engineer',
+                             'site reliability', 'infrastructure engineer', 'technical support']
+        
+        has_technical = any(kw in combined for kw in technical_keywords)
+        
+        if has_technical:
             return JobPriority.WEAK_MATCH, "Weak match: Some technical relevance"
+        
+        # Only show crypto/web3 jobs if they have some technical aspect
+        crypto_keywords = ['crypto', 'blockchain', 'web3', 'defi', 'bitcoin', 'ethereum', 'nft']
+        has_crypto = any(kw in combined for kw in crypto_keywords)
+        
+        # Only show crypto jobs if they also mention technical terms
+        if has_crypto and (has_technical or 'engineer' in combined or 'developer' in combined or 'technical' in combined):
+            return JobPriority.WEAK_MATCH, "Weak match: Crypto/Web3 with technical aspects"
 
-        # Default: Weak Match for any crypto/web3 job (don't blacklist by default)
-        if any(kw in combined for kw in ['crypto', 'blockchain', 'web3', 'defi', 'bitcoin', 'ethereum', 'nft']):
-            return JobPriority.WEAK_MATCH, "Weak match: Crypto/Web3 related"
-
-        # Only blacklist if truly irrelevant
-        return JobPriority.WEAK_MATCH, "Weak match: Generic role - review manually"
+        # Blacklist everything else - too generic or not IT-related
+        return JobPriority.BLACKLISTED, "Not IT-related - too generic or irrelevant"
 
 
 class PlaywrightBrowserManager:
@@ -1145,7 +1165,7 @@ class DelphiVenturesScraper(JobScraper):
         page = None
         try:
             logger.info(f"Scraping {self.source_name}...")
-            # Use advanced page loading
+            # Use advanced page loading with longer wait for Getro boards
             content, page = await self.get_page_content(
                 self.search_url,
                 handle_scroll=True,
@@ -1153,45 +1173,77 @@ class DelphiVenturesScraper(JobScraper):
             )
             
             if not content:
+                logger.warning(f"No content retrieved from {self.source_name}")
                 return jobs
             
             soup = BeautifulSoup(content, 'html.parser')
             
-            # Advanced selector strategy for Getro-powered boards
+            # Getro boards use specific structure - try multiple strategies
             job_elements = []
             
-            # Strategy 1: Article elements (Getro standard)
-            job_elements = soup.find_all('article')
+            # Strategy 1: Look for Getro-specific job cards (usually in a list)
+            # Getro often uses <li> elements with job data
+            job_elements = soup.find_all('li', class_=re.compile(r'job|listing|card|item|result', re.I))
             
-            # Strategy 2: Divs with job-related classes
+            # Strategy 2: Article elements (Getro standard)
             if not job_elements:
-                job_elements = soup.find_all(['div', 'li'], class_=re.compile(r'job|listing|card|item', re.I))
+                job_elements = soup.find_all('article')
             
-            # Strategy 3: Links to job pages
+            # Strategy 3: Divs with Getro-specific classes
             if not job_elements:
-                job_elements = soup.find_all('a', href=re.compile(r'/jobs/|/job/'))
+                # Getro often uses divs with data attributes or specific classes
+                job_elements = soup.find_all('div', class_=re.compile(r'job|listing|card|item|result|position', re.I))
             
-            # Strategy 4: Data attributes
+            # Strategy 4: Look for job links in structured format
+            if not job_elements:
+                # Getro job links usually have href containing /jobs/ or job ID
+                job_links = soup.find_all('a', href=re.compile(r'/jobs/|/job/|/positions/'))
+                if job_links:
+                    # Get parent containers of job links
+                    for link in job_links:
+                        parent = link.find_parent(['li', 'div', 'article'])
+                        if parent and parent not in job_elements:
+                            job_elements.append(parent)
+            
+            # Strategy 5: Data attributes (Getro sometimes uses these)
             if not job_elements:
                 job_elements = soup.find_all(['div', 'li'], attrs={'data-job-id': True})
+                if not job_elements:
+                    job_elements = soup.find_all(['div', 'li'], attrs={'data-position-id': True})
             
             logger.info(f"Found {len(job_elements)} potential job elements from {self.source_name}")
+            
+            # Debug: Log first element structure if found
+            if len(job_elements) > 0:
+                first_elem = str(job_elements[0])[:300]
+                logger.debug(f"First job element sample: {first_elem}")
+            else:
+                # Take screenshot for debugging
+                logger.warning(f"No job elements found. Page might not have loaded correctly.")
+                if page:
+                    try:
+                        await page.screenshot(path="debug_delphi_ventures.png", full_page=True)
+                        logger.info("Debug screenshot saved to debug_delphi_ventures.png")
+                    except:
+                        pass
             
             for element in job_elements[:50]:  # Increased limit
                 try:
                     job = self.parse_job(element)
                     if job:
                         jobs.append(job)
+                        logger.debug(f"Parsed Delphi job: {job.title} @ {job.company}")
                 except Exception as e:
                     logger.warning(f"Error parsing job element: {e}")
                     continue
                     
         except Exception as e:
-            logger.error(f"Error scraping {self.source_name}: {e}")
+            logger.error(f"Error scraping {self.source_name}: {e}", exc_info=True)
         finally:
             if page:
                 await page.close()
         
+        logger.info(f"Successfully scraped {len(jobs)} jobs from {self.source_name}")
         return jobs
 
     def parse_job(self, element, job_url: str = None) -> Optional[Job]:
