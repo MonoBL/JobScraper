@@ -2167,8 +2167,14 @@ class DiscordNotifier:
     def __init__(self, webhook_url: str):
         self.webhook_url = webhook_url
     
-    def send_summary(self, jobs: List[Job]):
-        """Send formatted job summary to Discord with improved layout"""
+    def send_summary(self, jobs: List[Job], include_all_weak_matches: bool = False):
+        """Send formatted job summary to Discord with improved layout
+        
+        Args:
+            jobs: List of jobs to send
+            include_all_weak_matches: If True, include ALL weak matches in the main message (startup run).
+                                     If False, save remaining weak matches for 9:05 AM (scheduled run).
+        """
         if not jobs:
             logger.info("No jobs to send to Discord")
             return
@@ -2260,30 +2266,45 @@ class DiscordNotifier:
                 embeds.append(embed)
         
         # Weak matches: Use text format instead of embeds to avoid size limits
-        # Show first batch in main message, save remaining for 9:30 AM message
         weak_matches_text = ""
         remaining_weak_matches = []
         if weak_matches:
             weak_matches_text = f"\n\n**🔍 Other Potential Roles ({len(weak_matches)} weak matches):**\n"
-            # Show first batch of weak matches in main message
-            # Limit to first 20 to stay under 2000 char limit for content
-            shown_count = 0
-            for job in weak_matches:
-                title = job.title[:80] + "..." if len(job.title) > 80 else job.title
-                company = job.company[:30] + "..." if len(job.company) > 30 else job.company
-                line = f"• {title} @ {company} - [View]({job.url})\n"
-                # Check if adding this line would exceed limit
-                if len(weak_matches_text) + len(line) > 1800:
-                    remaining_weak_matches = weak_matches[shown_count:]
-                    remaining = len(remaining_weak_matches)
-                    weak_matches_text += f"\n*... and {remaining} more weak matches (will be sent at 9:05 AM)*"
-                    break
-                weak_matches_text += line
-                shown_count += 1
             
-            # Save remaining weak matches to file for 9:05 AM message
-            if remaining_weak_matches:
-                save_remaining_weak_matches(remaining_weak_matches)
+            if include_all_weak_matches:
+                # Startup run: Show ALL weak matches in the main message
+                shown_count = 0
+                for job in weak_matches:
+                    title = job.title[:80] + "..." if len(job.title) > 80 else job.title
+                    company = job.company[:30] + "..." if len(job.company) > 30 else job.company
+                    line = f"• {title} @ {company} - [View]({job.url})\n"
+                    # Check if adding this line would exceed limit
+                    if len(weak_matches_text) + len(line) > 1800:
+                        remaining_weak_matches = weak_matches[shown_count:]
+                        remaining = len(remaining_weak_matches)
+                        weak_matches_text += f"\n*... and {remaining} more (see additional message below)*"
+                        break
+                    weak_matches_text += line
+                    shown_count += 1
+            else:
+                # Scheduled run: Show first batch, save remaining for 9:05 AM message
+                shown_count = 0
+                for job in weak_matches:
+                    title = job.title[:80] + "..." if len(job.title) > 80 else job.title
+                    company = job.company[:30] + "..." if len(job.company) > 30 else job.company
+                    line = f"• {title} @ {company} - [View]({job.url})\n"
+                    # Check if adding this line would exceed limit
+                    if len(weak_matches_text) + len(line) > 1800:
+                        remaining_weak_matches = weak_matches[shown_count:]
+                        remaining = len(remaining_weak_matches)
+                        weak_matches_text += f"\n*... and {remaining} more weak matches (will be sent at 9:05 AM)*"
+                        break
+                    weak_matches_text += line
+                    shown_count += 1
+                
+                # Save remaining weak matches to file for 9:05 AM message (only on scheduled runs)
+                if remaining_weak_matches:
+                    save_remaining_weak_matches(remaining_weak_matches)
         
         # Discord has a limit of 10 embeds per message and 2000 chars for content
         # Split into multiple messages if needed
@@ -2334,8 +2355,44 @@ class DiscordNotifier:
                 raise
         
         logger.info(f"Successfully sent main message with {len(jobs)} jobs to Discord in {len(embed_chunks)} message(s)")
-        if remaining_weak_matches:
-                logger.info(f"Saved {len(remaining_weak_matches)} remaining weak matches for 9:05 AM message")
+        
+        # Send additional message with remaining weak matches if on startup (include_all_weak_matches=True)
+        if include_all_weak_matches and remaining_weak_matches:
+            # Send immediately as additional message(s)
+            logger.info(f"Sending {len(remaining_weak_matches)} additional weak matches (startup run)...")
+            chunks = []
+            current_chunk = f"**🔍 Weak Matches (continued from above - {len(remaining_weak_matches)} more):**\n\n"
+            
+            for job in remaining_weak_matches:
+                title = job.title[:80] + "..." if len(job.title) > 80 else job.title
+                company = job.company[:30] + "..." if len(job.company) > 30 else job.company
+                line = f"• {title} @ {company} - [View]({job.url})\n"
+                
+                if len(current_chunk) + len(line) > 1900:
+                    chunks.append(current_chunk)
+                    current_chunk = f"**🔍 Weak Matches (continued):**\n\n{line}"
+                else:
+                    current_chunk += line
+            
+            if current_chunk:
+                chunks.append(current_chunk)
+            
+            # Send each chunk
+            for chunk_idx, chunk_text in enumerate(chunks):
+                try:
+                    payload = {
+                        "content": chunk_text + (f"\n*Part {chunk_idx + 1} of {len(chunks)}*" if len(chunks) > 1 else ""),
+                        "embeds": []
+                    }
+                    response = requests.post(self.webhook_url, json=payload, timeout=30)
+                    response.raise_for_status()
+                    logger.info(f"Successfully sent additional weak matches message {chunk_idx + 1}/{len(chunks)} (HTTP {response.status_code})")
+                    if chunk_idx < len(chunks) - 1:
+                        time.sleep(1)
+                except Exception as e:
+                    logger.error(f"Error sending additional weak matches message {chunk_idx + 1}: {e}")
+        elif not include_all_weak_matches and remaining_weak_matches:
+            logger.info(f"Saved {len(remaining_weak_matches)} remaining weak matches for 9:05 AM message")
 
 
 async def scrape_all_jobs() -> List[Job]:
@@ -2711,8 +2768,13 @@ def release_lock():
         logger.warning(f"Error releasing lock: {e}")
 
 
-async def run_daily_scrape_async():
-    """Main async function to run daily scrape"""
+async def run_daily_scrape_async(is_startup_run: bool = False):
+    """Main async function to run daily scrape
+    
+    Args:
+        is_startup_run: True if this is the first run on startup (show all weak matches immediately),
+                       False if this is a scheduled run (split weak matches to 9:05 AM)
+    """
     # Check for lock file to prevent multiple instances
     # Add a longer random delay to prevent race conditions when schedule triggers multiple times
     # This gives time for any previous instance to finish and release the lock
@@ -2795,7 +2857,9 @@ async def run_daily_scrape_async():
                 try:
                     logger.info(f"Attempting to send {len(new_jobs)} jobs to Discord...")
                     notifier = DiscordNotifier(webhook_url)
-                    notifier.send_summary(new_jobs)
+                    # On startup, include all weak matches in the main message
+                    # On scheduled runs, split weak matches to 9:05 AM
+                    notifier.send_summary(new_jobs, include_all_weak_matches=is_startup_run)
                     logger.info("Successfully sent jobs to Discord!")
                 except Exception as e:
                     logger.error(f"Error sending to Discord: {e}", exc_info=True)
@@ -2826,9 +2890,13 @@ async def run_daily_scrape_async():
         release_lock()
 
 
-def run_daily_scrape():
-    """Wrapper to run async scrape"""
-    asyncio.run(run_daily_scrape_async())
+def run_daily_scrape(is_startup_run: bool = False):
+    """Wrapper to run async scrape
+    
+    Args:
+        is_startup_run: True if this is the first run on startup
+    """
+    asyncio.run(run_daily_scrape_async(is_startup_run=is_startup_run))
 
 
 def send_startup_notification():
@@ -2873,11 +2941,11 @@ def main():
     send_startup_notification()
     
     try:
-        # Run immediately on start (for testing)
-        run_daily_scrape()
+        # Run immediately on start - show ALL weak matches (is_startup_run=True)
+        run_daily_scrape(is_startup_run=True)
         
-        # Schedule daily runs at 9:00 AM
-        schedule.every().day.at("09:00").do(run_daily_scrape)
+        # Schedule daily runs at 9:00 AM - split weak matches to 9:05 AM (is_startup_run=False)
+        schedule.every().day.at("09:00").do(run_daily_scrape, is_startup_run=False)
         # Schedule remaining weak matches at 9:05 AM
         schedule.every().day.at("09:05").do(send_remaining_weak_matches)
         
