@@ -1936,6 +1936,17 @@ def send_remaining_weak_matches():
     remaining_jobs = load_remaining_weak_matches()
     if not remaining_jobs:
         logger.info("No remaining weak matches to send")
+        # Send confirmation message to Discord
+        try:
+            payload = {
+                "content": "------\n✅ **9:05 AM Check:** No remaining weak matches to send (all jobs were shown in the 9:00 AM report)",
+                "embeds": []
+            }
+            response = requests.post(webhook_url, json=payload, timeout=30)
+            response.raise_for_status()
+            logger.info(f"Sent 'no remaining weak matches' confirmation to Discord (HTTP {response.status_code})")
+        except Exception as e:
+            logger.error(f"Error sending confirmation to Discord: {e}")
         return
     
     try:
