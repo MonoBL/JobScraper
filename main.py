@@ -2006,6 +2006,320 @@ class FindCryptoJobsScraper(JobScraper):
             return None
 
 
+class RemoteOKScraper(JobScraper):
+    """Scraper for RemoteOK - crypto/remote jobs"""
+    
+    def __init__(self):
+        super().__init__(
+            "RemoteOK",
+            "https://remoteok.com",
+            job_list_selector='tr.job',
+            wait_timeout=30000
+        )
+        # Use crypto tag for filtered results
+        self.search_url = "https://remoteok.com/remote-crypto-jobs"
+
+    async def scrape(self) -> List[Job]:
+        """Scrape RemoteOK crypto jobs"""
+        jobs = []
+        page = None
+        try:
+            logger.info(f"Scraping {self.source_name}...")
+            
+            page = await PlaywrightBrowserManager.create_page()
+            await page.goto(self.search_url, wait_until='domcontentloaded', timeout=30000)
+            
+            # Wait for job table to load
+            try:
+                await page.wait_for_selector('tr.job, table.jobs', timeout=10000)
+            except:
+                logger.warning(f"Timeout waiting for job listings on {self.source_name}")
+            
+            await page.wait_for_timeout(2000)
+            
+            # Handle scroll
+            await self.handle_infinite_scroll(page)
+            
+            content = await page.content()
+            
+            if not content:
+                logger.warning(f"No content retrieved from {self.source_name}")
+                return jobs
+            
+            soup = BeautifulSoup(content, 'html.parser')
+            
+            # RemoteOK uses table rows for jobs
+            job_elements = soup.find_all('tr', class_='job')
+            
+            # Fallback: all tr elements in the jobs table
+            if not job_elements:
+                jobs_table = soup.find('table', class_='jobs')
+                if jobs_table:
+                    job_elements = jobs_table.find_all('tr')[1:]  # Skip header
+            
+            logger.info(f"Found {len(job_elements)} potential job elements from {self.source_name}")
+            
+            if not job_elements:
+                logger.warning(f"No job elements found on {self.source_name}")
+                screenshot_path = f"debug_RemoteOK.png"
+                await page.screenshot(path=screenshot_path, full_page=True)
+                logger.info(f"Debug screenshot saved to {screenshot_path}")
+            
+            parsed_count = 0
+            for element in job_elements[:100]:
+                try:
+                    job = self.parse_job(element)
+                    if job:
+                        jobs.append(job)
+                        parsed_count += 1
+                except Exception as e:
+                    logger.warning(f"Error parsing job element: {e}")
+                    continue
+            logger.info(f"Successfully scraped {parsed_count} jobs from {self.source_name}")
+                    
+        except Exception as e:
+            logger.error(f"Error scraping {self.source_name}: {e}")
+        finally:
+            if page:
+                await page.close()
+        
+        return jobs
+
+    def parse_job(self, element, job_url: str = None) -> Optional[Job]:
+        """Parse a RemoteOK job element"""
+        try:
+            # Skip header rows and ads
+            if element.get('class') and any(cls in ['header', 'ad', 'separator'] for cls in element.get('class', [])):
+                return None
+            
+            # Extract URL
+            url = job_url
+            link_elem = element.find('a', href=True, itemprop='url')
+            if not link_elem:
+                link_elem = element.find('a', href=True)
+            
+            if link_elem and link_elem.get('href'):
+                href = link_elem['href']
+                if not href.startswith('http'):
+                    url = f"{self.base_url}{href}"
+                else:
+                    url = href
+            
+            if not url:
+                return None
+            
+            # Extract title
+            title = "Unknown Title"
+            title_elem = element.find('h2', itemprop='title')
+            if not title_elem:
+                title_elem = element.find(['h2', 'h3', 'td'], class_=re.compile(r'title|position', re.I))
+            if title_elem:
+                title = title_elem.get_text(strip=True)
+            
+            if not title or len(title) < 5:
+                return None
+            
+            # Extract company
+            company = "Unknown"
+            company_elem = element.find('h3', itemprop='name')
+            if not company_elem:
+                company_elem = element.find(['h3', 'span', 'td'], class_=re.compile(r'company|employer', re.I))
+            if company_elem:
+                company = company_elem.get_text(strip=True)
+            
+            # Extract tags/description
+            description = ""
+            tags_elem = element.find_all(class_='tag')
+            if tags_elem:
+                description = " ".join([tag.get_text(strip=True) for tag in tags_elem])
+            
+            # Also get any other text content
+            desc_elem = element.find(['p', 'div'], class_=re.compile(r'description|summary', re.I))
+            if desc_elem:
+                description += " " + desc_elem.get_text(strip=True)
+            
+            if not description:
+                description = element.get_text(strip=True, separator=' ')[:500]
+            
+            priority, reason = JobRanker.rank_job(title, description)
+            
+            if priority == JobPriority.BLACKLISTED:
+                return None
+            
+            return Job(
+                title=title,
+                company=company,
+                url=url,
+                description=description[:300],
+                source=self.source_name,
+                priority=priority,
+                priority_reason=reason
+            )
+        except Exception as e:
+            logger.warning(f"Error parsing job: {e}")
+            return None
+
+
+class WellfoundScraper(JobScraper):
+    """Scraper for Wellfound (formerly AngelList) - startup jobs"""
+    
+    def __init__(self):
+        super().__init__(
+            "Wellfound",
+            "https://wellfound.com",
+            job_list_selector='div[class*="job"], div[class*="JobListing"]',
+            wait_timeout=30000
+        )
+        # Use crypto/web3 role search
+        self.search_url = "https://wellfound.com/role/r/web3-engineer"
+
+    async def scrape(self) -> List[Job]:
+        """Scrape Wellfound crypto/web3 jobs"""
+        jobs = []
+        page = None
+        try:
+            logger.info(f"Scraping {self.source_name}...")
+            
+            page = await PlaywrightBrowserManager.create_page()
+            await page.goto(self.search_url, wait_until='domcontentloaded', timeout=30000)
+            
+            # Wait for job listings to load
+            try:
+                await page.wait_for_selector('div[class*="JobListing"], div[class*="job"], article', timeout=10000)
+            except:
+                logger.warning(f"Timeout waiting for job listings on {self.source_name}")
+            
+            await page.wait_for_timeout(3000)
+            
+            # Handle scroll
+            await self.handle_infinite_scroll(page)
+            
+            content = await page.content()
+            
+            if not content:
+                logger.warning(f"No content retrieved from {self.source_name}")
+                return jobs
+            
+            soup = BeautifulSoup(content, 'html.parser')
+            
+            # Wellfound uses divs with job-related classes
+            job_elements = []
+            
+            # Strategy 1: Divs with JobListing classes
+            job_elements = soup.find_all('div', class_=re.compile(r'JobListing|job-listing', re.I))
+            
+            # Strategy 2: Articles
+            if not job_elements:
+                job_elements = soup.find_all('article')
+            
+            # Strategy 3: Divs with job/card classes
+            if not job_elements:
+                job_elements = soup.find_all('div', class_=re.compile(r'job|card|position', re.I))
+            
+            # Strategy 4: Links to job pages
+            if not job_elements:
+                job_elements = soup.find_all('a', href=re.compile(r'/jobs/|/l/'))
+            
+            logger.info(f"Found {len(job_elements)} potential job elements from {self.source_name}")
+            
+            if not job_elements:
+                logger.warning(f"No job elements found on {self.source_name}")
+                screenshot_path = f"debug_Wellfound.png"
+                await page.screenshot(path=screenshot_path, full_page=True)
+                logger.info(f"Debug screenshot saved to {screenshot_path}")
+            
+            parsed_count = 0
+            for element in job_elements[:100]:
+                try:
+                    job = self.parse_job(element)
+                    if job:
+                        jobs.append(job)
+                        parsed_count += 1
+                except Exception as e:
+                    logger.warning(f"Error parsing job element: {e}")
+                    continue
+            logger.info(f"Successfully scraped {parsed_count} jobs from {self.source_name}")
+                    
+        except Exception as e:
+            logger.error(f"Error scraping {self.source_name}: {e}")
+        finally:
+            if page:
+                await page.close()
+        
+        return jobs
+
+    def parse_job(self, element, job_url: str = None) -> Optional[Job]:
+        """Parse a Wellfound job element"""
+        try:
+            # Extract URL
+            url = job_url
+            link_elem = element.find('a', href=True)
+            if link_elem and link_elem.get('href'):
+                href = link_elem['href']
+                if not href.startswith('http'):
+                    url = f"{self.base_url}{href}"
+                else:
+                    url = href
+            
+            if not url:
+                # If element itself is a link
+                if element.name == 'a' and element.get('href'):
+                    href = element.get('href')
+                    if not href.startswith('http'):
+                        url = f"{self.base_url}{href}"
+                    else:
+                        url = href
+                else:
+                    return None
+            
+            # Extract title
+            title = "Unknown Title"
+            title_elem = element.find(['h2', 'h3', 'h4', 'span'], class_=re.compile(r'title|role|position', re.I))
+            if title_elem:
+                title = title_elem.get_text(strip=True)
+            elif link_elem:
+                title = link_elem.get_text(strip=True)
+            
+            if not title or len(title) < 5:
+                return None
+            
+            # Skip if it's clearly not a job
+            if any(skip in title.lower() for skip in ['sign up', 'log in', 'get started', 'learn more']):
+                return None
+            
+            # Extract company
+            company = "Unknown"
+            company_elem = element.find(['span', 'div', 'a'], class_=re.compile(r'company|startup', re.I))
+            if company_elem:
+                company = company_elem.get_text(strip=True)
+            
+            # Extract description/tags
+            description = ""
+            desc_elem = element.find(['p', 'div', 'span'], class_=re.compile(r'description|summary|tag', re.I))
+            if desc_elem:
+                description = desc_elem.get_text(strip=True)
+            else:
+                description = element.get_text(strip=True, separator=' ')[:500]
+            
+            priority, reason = JobRanker.rank_job(title, description)
+            
+            if priority == JobPriority.BLACKLISTED:
+                return None
+            
+            return Job(
+                title=title,
+                company=company,
+                url=url,
+                description=description[:300],
+                source=self.source_name,
+                priority=priority,
+                priority_reason=reason
+            )
+        except Exception as e:
+            logger.warning(f"Error parsing job: {e}")
+            return None
+
+
 class TelegramScraper(JobScraper):
     """Scraper for Telegram channels using web preview"""
     
@@ -2404,6 +2718,8 @@ async def scrape_all_jobs() -> List[Job]:
         CryptocurrencyJobsScraper(),
         CryptoJobsScraper(),
         FindCryptoJobsScraper(),
+        RemoteOKScraper(),
+        WellfoundScraper(),
         # SolanaJobsScraper(),  # Temporarily disabled: site blocks scrapers (403 Forbidden + download triggers)
         DelphiVenturesScraper(),
         TelegramScraper()
