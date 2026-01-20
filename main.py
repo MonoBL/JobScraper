@@ -2519,6 +2519,35 @@ def run_daily_scrape():
     asyncio.run(run_daily_scrape_async())
 
 
+def send_startup_notification():
+    """Send startup confirmation to Discord"""
+    webhook_url = os.getenv('DISCORD_WEBHOOK_URL')
+    if not webhook_url:
+        logger.warning("DISCORD_WEBHOOK_URL not set. Cannot send startup notification.")
+        return
+    
+    try:
+        # Get hostname/server info
+        import socket
+        hostname = socket.gethostname()
+        
+        payload = {
+            "content": f"🚀 **Bot Startup Notification**\n\n"
+                      f"✅ Bot Version: **{BOT_VERSION}**\n"
+                      f"🖥️ Server: **{hostname}**\n"
+                      f"⏰ Started at: **{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}**\n"
+                      f"📅 Next run: **09:00 AM daily**\n"
+                      f"📊 Weak matches follow-up: **09:05 AM daily**\n\n"
+                      f"_Bot is now running and monitoring crypto job boards..._",
+            "embeds": []
+        }
+        response = requests.post(webhook_url, json=payload, timeout=30)
+        response.raise_for_status()
+        logger.info(f"Sent startup notification to Discord (HTTP {response.status_code})")
+    except Exception as e:
+        logger.error(f"Error sending startup notification to Discord: {e}")
+
+
 def main():
     """Main entry point"""
     # Kill any existing instances first (prevents duplicates from manual starts)
@@ -2527,6 +2556,9 @@ def main():
     # Don't acquire lock here - let each scrape run acquire its own lock
     # This prevents the main process from holding the lock while scheduler runs
     logger.info(f"Job Scraper Bot {BOT_VERSION} starting...")
+    
+    # Send startup notification to Discord
+    send_startup_notification()
     
     try:
         # Run immediately on start (for testing)
