@@ -6,7 +6,7 @@ Uses Playwright for JavaScript-rendered content.
 """
 
 # Bot version - update this when making significant changes
-BOT_VERSION = "v2.1"
+BOT_VERSION = "v2.2"
 
 import os
 import re
