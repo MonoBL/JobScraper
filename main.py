@@ -2625,6 +2625,10 @@ class DiscordNotifier:
         max_embeds_per_message = 10
         embed_chunks = [embeds[i:i + max_embeds_per_message] for i in range(0, len(embeds), max_embeds_per_message)]
         
+        # If no embeds but we have weak matches, ensure at least one message is sent
+        if not embed_chunks and weak_matches:
+            embed_chunks = [[]]  # Empty embed list, but still sends a message with content
+        
         for msg_idx, embed_chunk in enumerate(embed_chunks):
             # Main message header (only on first message)
             if msg_idx == 0:
@@ -2668,7 +2672,9 @@ class DiscordNotifier:
                 logger.error(f"Unexpected error sending message {msg_idx + 1} to Discord: {e}", exc_info=True)
                 raise
         
-        logger.info(f"Successfully sent main message with {len(jobs)} jobs to Discord in {len(embed_chunks)} message(s)")
+        # More accurate logging
+        total_messages = len(embed_chunks) if embed_chunks else 1  # At least 1 message sent (even if only weak matches)
+        logger.info(f"Successfully sent main response with {len(jobs)} jobs to Discord in {total_messages} message(s)")
         
         # Send additional message with remaining weak matches if on startup (include_all_weak_matches=True)
         if include_all_weak_matches and remaining_weak_matches:
