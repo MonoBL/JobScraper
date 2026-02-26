@@ -5,9 +5,8 @@ A custom Python bot that scrapes Web3/Crypto job boards daily and ranks them bas
 ## 🎯 Features
 
 - **Multi-Source Scraping**: Automatically scrapes jobs from:
-  - [Web3.career](https://web3.career) (focus on technical support/infra roles)
-  - [CryptoJobsList.com](https://cryptojobslist.com)
-  - [CryptocurrencyJobs.co](https://cryptocurrencyjobs.co)
+  - **Crypto/Web3**: Web3.career, CryptoJobsList.com, CryptocurrencyJobs.co, CryptoJobs.com, FindCryptoJobs.xyz, RemoteOK, Wellfound, Delphi Ventures, Telegram channels
+  - **Cruise/Maritime IT**: [Carnival Ship Jobs](https://shipjobs.carnival.com/search?q=), [AllCruiseJobs.com IT](https://www.allcruisejobs.com/it-jobs/), [Selection Partners](https://selectionpartners.net/jobs/), [PeopleConquest](https://www.peopleconquest.com/jobs/), [Douro Azul IT](https://www.douroazul.com/oportunidades/?_sft_area-funcao=information-technology)
 
 - **Smart Ranking System ("Nuno Filter")**:
   - 🥇 **Perfect Match**: Jobs matching "Junior DevOps", "SysAdmin", "L2 Support", "Infrastructure Engineer", "Node Operator" with Linux/Ubuntu + Python/Bash requirements
@@ -15,7 +14,7 @@ A custom Python bot that scrapes Web3/Crypto job boards daily and ranks them bas
   - 🥉 **Weak Match**: Generic customer support roles
   - 🚫 **Blacklisted**: Automatically filters out Marketing, Sales, HR, Legal, and Senior Solidity Developer roles
 
-- **Discord Notifications**: Sends beautifully formatted job summaries to Discord via webhook
+- **Discord Notifications**: Sends job summaries via webhook with **two sections**: 🪙 **Crypto / Web3 Jobs** and 🚢 **Cruise / Maritime IT Jobs**
 - **Error Handling**: Robust error handling ensures one scraper failure doesn't stop the others
 - **Scheduled Runs**: Automatically runs daily at 09:00 AM (configurable)
 

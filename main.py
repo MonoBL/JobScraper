@@ -65,6 +65,7 @@ class Job:
     priority: JobPriority
     priority_reason: str
     posted_date: Optional[str] = None
+    category: str = "crypto"  # "crypto" | "cruise" for Discord section separation
 
     def to_dict(self):
         return {
@@ -72,6 +73,11 @@ class Job:
             'priority': self.priority.name,
             'priority_value': self.priority.value
         }
+
+
+def _job_category(job: Job) -> str:
+    """Return job category for grouping (crypto vs cruise)."""
+    return getattr(job, 'category', 'crypto') or 'crypto'
 
 
 class JobRanker:
@@ -247,6 +253,34 @@ class JobRanker:
 
         # Blacklist everything else - too generic or not IT-related
         return JobPriority.BLACKLISTED, "Not IT-related - too generic or irrelevant"
+
+
+class CruiseJobRanker:
+    """Ranks cruise/maritime IT jobs. Used only for cruise category scrapers."""
+    PERFECT_TITLES = [
+        "it officer", "it systems manager", "systems manager", "it manager",
+        "senior it officer", "staff it", "it administrator", "network engineer",
+        "electro-technical", "eto ", "2nd eto", "3rd eto", "it support specialist"
+    ]
+    GOOD_TITLES = [
+        "it assistant", "assistant it", "it support", "technical support",
+        "it administrator", "jr it", "junior it", "sr it assistant"
+    ]
+    IT_KEYWORDS = [
+        "it ", " information technology", "computer", "network", "systems",
+        "software", "hardware", "technical support", "electro-technical", "eto"
+    ]
+
+    @staticmethod
+    def rank_job(title: str, description: str) -> tuple[JobPriority, str]:
+        combined = (title + " " + description).lower()
+        if any(t in combined for t in CruiseJobRanker.PERFECT_TITLES):
+            return JobPriority.PERFECT_MATCH, "Cruise IT: strong match"
+        if any(t in combined for t in CruiseJobRanker.GOOD_TITLES):
+            return JobPriority.GOOD_MATCH, "Cruise IT: good match"
+        if any(kw in combined for kw in CruiseJobRanker.IT_KEYWORDS):
+            return JobPriority.WEAK_MATCH, "Cruise IT: weak match"
+        return JobPriority.BLACKLISTED, "Not IT-related"
 
 
 class PlaywrightBrowserManager:
@@ -2475,6 +2509,327 @@ class TelegramScraper(JobScraper):
             return None
 
 
+# ---------- Cruise / Maritime IT Job Scrapers ----------
+
+# Carnival ship jobs: filter for IT-related roles only
+_CARNIVAL_IT_PATTERNS = [
+    "it officer", "assistant it", "it systems", "2nd eto", "3rd eto",
+    "electro-technical", "information technology", "it administrator",
+    "it manager", "it support", "it assistant", "eto officer"
+]
+
+
+class CarnivalShipJobsScraper(JobScraper):
+    """Scraper for Carnival Cruise Line ship jobs (IT-related only)."""
+    base = "https://shipjobs.carnival.com"
+
+    def __init__(self):
+        super().__init__(
+            "Carnival Ship Jobs",
+            self.base,
+            job_list_selector='a[href*="/job/"]',
+            wait_timeout=30000
+        )
+        self.search_url = "https://shipjobs.carnival.com/search?q="
+
+    async def scrape(self) -> List[Job]:
+        jobs = []
+        page = None
+        try:
+            logger.info(f"Scraping {self.source_name}...")
+            content, page = await self.get_page_content(
+                self.search_url, handle_scroll=True
+            )
+            if not content:
+                return jobs
+            soup = BeautifulSoup(content, 'html.parser')
+            # Links to job pages: /job/slug/id
+            for a in soup.find_all('a', href=re.compile(r'/job/[^/]+/\d+')):
+                href = a.get('href')
+                if not href:
+                    continue
+                url = href if href.startswith('http') else self.base.rstrip('/') + href
+                title = (a.get_text(strip=True) or "").strip()
+                if not title or len(title) < 3:
+                    continue
+                # Find block: often department + link + description
+                block = a.find_parent(['div', 'section', 'article', 'li']) or a
+                desc = ""
+                if block:
+                    desc = block.get_text(strip=True, separator=' ')[:500]
+                combined = (title + " " + desc).lower()
+                if not any(p in combined for p in _CARNIVAL_IT_PATTERNS):
+                    continue
+                priority, reason = CruiseJobRanker.rank_job(title, desc)
+                if priority == JobPriority.BLACKLISTED:
+                    continue
+                # Company is Carnival
+                job = Job(
+                    title=title,
+                    company="Carnival Cruise Line",
+                    url=url,
+                    description=desc[:300],
+                    source=self.source_name,
+                    priority=priority,
+                    priority_reason=reason,
+                    category="cruise"
+                )
+                jobs.append(job)
+            logger.info(f"Scraped {len(jobs)} IT-related jobs from {self.source_name}")
+        except Exception as e:
+            logger.error(f"Error scraping {self.source_name}: {e}")
+        finally:
+            if page:
+                await page.close()
+        return jobs
+
+
+class AllCruiseJobsScraper(JobScraper):
+    """Scraper for AllCruiseJobs.com IT jobs page."""
+    base = "https://www.allcruisejobs.com"
+
+    def __init__(self):
+        super().__init__(
+            "AllCruiseJobs.com",
+            self.base,
+            job_list_selector='article, .job, h2',
+            wait_timeout=30000
+        )
+        self.search_url = "https://www.allcruisejobs.com/it-jobs/"
+
+    async def scrape(self) -> List[Job]:
+        jobs = []
+        page = None
+        try:
+            logger.info(f"Scraping {self.source_name}...")
+            page = await PlaywrightBrowserManager.create_page()
+            for page_num in range(1, 3):
+                url = f"{self.search_url}{page_num}/" if page_num > 1 else self.search_url
+                await page.goto(url, wait_until='domcontentloaded', timeout=self.wait_timeout)
+                await page.wait_for_timeout(2000)
+                content = await page.content()
+                if not content:
+                    break
+                soup = BeautifulSoup(content, 'html.parser')
+                # Common patterns: h2 title, then description, then "Date - Company - Lang"
+                for h2 in soup.find_all(['h2', 'h3']):
+                    title = h2.get_text(strip=True)
+                    if not title or len(title) < 5:
+                        continue
+                    # Skip non-job headings
+                    if title.lower() in ('it jobs on cruise ships', 'cruise ship jobs', 'select a position >'):
+                        continue
+                    next_el = h2.find_next_sibling()
+                    desc = ""
+                    company = "Cruise Line"
+                    while next_el and next_el.name not in ('h2', 'h3'):
+                        text = next_el.get_text(strip=True)
+                        if text:
+                            if re.match(r'^[A-Za-z]+\s+\d{1,2},?\s+\d{4}\s+-', text):
+                                parts = text.split(' - ', 2)
+                                if len(parts) >= 2:
+                                    company = parts[1].strip()
+                            else:
+                                desc = text[:400]
+                        next_el = next_el.find_next_sibling()
+                    link = h2.find_next('a', href=True)
+                    url = link['href'] if link and link.get('href') else self.search_url
+                    if not url.startswith('http'):
+                        url = self.base + url
+                    priority, reason = CruiseJobRanker.rank_job(title, desc or title)
+                    if priority == JobPriority.BLACKLISTED:
+                        continue
+                    jobs.append(Job(
+                        title=title,
+                        company=company,
+                        url=url,
+                        description=(desc or title)[:300],
+                        source=self.source_name,
+                        priority=priority,
+                        priority_reason=reason,
+                        category="cruise"
+                    ))
+            logger.info(f"Scraped {len(jobs)} jobs from {self.source_name}")
+        except Exception as e:
+            logger.error(f"Error scraping {self.source_name}: {e}")
+        finally:
+            if page:
+                await page.close()
+        return jobs
+
+
+class SelectionPartnersScraper(JobScraper):
+    """Scraper for Selection Partners cruise jobs (IT positions only)."""
+    base = "https://selectionpartners.net"
+
+    def __init__(self):
+        super().__init__(
+            "Selection Partners",
+            self.base,
+            job_list_selector='article, .job, h3',
+            wait_timeout=30000
+        )
+        self.search_url = "https://selectionpartners.net/jobs/"
+
+    async def scrape(self) -> List[Job]:
+        jobs = []
+        page = None
+        try:
+            logger.info(f"Scraping {self.source_name}...")
+            content, page = await self.get_page_content(self.search_url, handle_scroll=True)
+            if not content:
+                return jobs
+            soup = BeautifulSoup(content, 'html.parser')
+            for h3 in soup.find_all('h3'):
+                title = h3.get_text(strip=True)
+                if not title or 'it' not in title.lower():
+                    continue
+                link = h3.find_next('a', href=True) or h3.find_previous('a', href=True)
+                if not link or not link.get('href'):
+                    continue
+                href = link['href']
+                url = href if href.startswith('http') else self.base.rstrip('/') + '/' + href.lstrip('/')
+                # Company from link text (e.g. "10 paísesPrincess CruisesAbierta" -> Princess Cruises)
+                link_text = link.get_text(strip=True) or ""
+                company = "Cruise Line"
+                for cruise in ("Princess Cruises", "Royal Caribbean", "Celebrity", "Carnival Cruise Line", "Seabourn", "P&O Cruises"):
+                    if cruise.lower() in link_text.lower():
+                        company = cruise
+                        break
+                priority, reason = CruiseJobRanker.rank_job(title, title)
+                if priority == JobPriority.BLACKLISTED:
+                    continue
+                jobs.append(Job(
+                    title=title,
+                    company=company,
+                    url=url,
+                    description=title[:300],
+                    source=self.source_name,
+                    priority=priority,
+                    priority_reason=reason,
+                    category="cruise"
+                ))
+            logger.info(f"Scraped {len(jobs)} IT jobs from {self.source_name}")
+        except Exception as e:
+            logger.error(f"Error scraping {self.source_name}: {e}")
+        finally:
+            if page:
+                await page.close()
+        return jobs
+
+
+class PeopleConquestScraper(JobScraper):
+    """Scraper for PeopleConquest jobs (Informática / IT)."""
+    base = "https://www.peopleconquest.com"
+
+    def __init__(self):
+        super().__init__(
+            "PeopleConquest",
+            self.base,
+            job_list_selector='a[href*="job"], .job',
+            wait_timeout=30000
+        )
+        self.search_url = "https://www.peopleconquest.com/jobs/"
+
+    async def scrape(self) -> List[Job]:
+        jobs = []
+        page = None
+        try:
+            logger.info(f"Scraping {self.source_name}...")
+            content, page = await self.get_page_content(self.search_url)
+            if not content:
+                return jobs
+            soup = BeautifulSoup(content, 'html.parser')
+            # Look for job links (structure may vary)
+            for a in soup.find_all('a', href=re.compile(r'/job|/jobs/|/oportunidades|/oferta')):
+                href = a.get('href', '')
+                if not href or '#' in href:
+                    continue
+                text = a.get_text(strip=True)
+                if not text or len(text) < 5 or len(text) > 200:
+                    continue
+                url = href if href.startswith('http') else self.base + href
+                # Prefer IT-related if we can detect
+                combined = (text + " " + href).lower()
+                if 'informática' in combined or 'it ' in combined or 'technology' in combined or 'tech' in combined:
+                    priority, reason = CruiseJobRanker.rank_job(text, text)
+                else:
+                    priority = JobPriority.WEAK_MATCH
+                    reason = "Cruise/maritime job board"
+                jobs.append(Job(
+                    title=text,
+                    company="PeopleConquest",
+                    url=url,
+                    description=text[:300],
+                    source=self.source_name,
+                    priority=priority,
+                    priority_reason=reason,
+                    category="cruise"
+                ))
+            logger.info(f"Scraped {len(jobs)} jobs from {self.source_name}")
+        except Exception as e:
+            logger.error(f"Error scraping {self.source_name}: {e}")
+        finally:
+            if page:
+                await page.close()
+        return jobs
+
+
+class DouroAzulScraper(JobScraper):
+    """Scraper for Douro Azul opportunities (IT filter)."""
+    base = "https://www.douroazul.com"
+
+    def __init__(self):
+        super().__init__(
+            "Douro Azul",
+            self.base,
+            job_list_selector='.job, article, .result',
+            wait_timeout=30000
+        )
+        self.search_url = "https://www.douroazul.com/oportunidades/?_sft_area-funcao=information-technology"
+
+    async def scrape(self) -> List[Job]:
+        jobs = []
+        page = None
+        try:
+            logger.info(f"Scraping {self.source_name}...")
+            content, page = await self.get_page_content(self.search_url)
+            if not content:
+                return jobs
+            if 'não foram encontrados resultados' in content.lower() or 'no results' in content.lower():
+                logger.info(f"No IT vacancies at {self.source_name}")
+                return jobs
+            soup = BeautifulSoup(content, 'html.parser')
+            for a in soup.find_all('a', href=re.compile(r'/oportunidades/|/job|smartrecruiters')):
+                href = a.get('href', '')
+                if not href:
+                    continue
+                text = a.get_text(strip=True)
+                if not text or len(text) < 5:
+                    continue
+                url = href if href.startswith('http') else self.base + href
+                priority, reason = CruiseJobRanker.rank_job(text, text)
+                if priority == JobPriority.BLACKLISTED:
+                    continue
+                jobs.append(Job(
+                    title=text,
+                    company="Douro Azul",
+                    url=url,
+                    description=text[:300],
+                    source=self.source_name,
+                    priority=priority,
+                    priority_reason=reason,
+                    category="cruise"
+                ))
+            logger.info(f"Scraped {len(jobs)} jobs from {self.source_name}")
+        except Exception as e:
+            logger.error(f"Error scraping {self.source_name}: {e}")
+        finally:
+            if page:
+                await page.close()
+        return jobs
+
+
 class DiscordNotifier:
     """Send job summaries to Discord via webhook"""
     
@@ -2482,12 +2837,8 @@ class DiscordNotifier:
         self.webhook_url = webhook_url
     
     def send_summary(self, jobs: List[Job], include_all_weak_matches: bool = False):
-        """Send formatted job summary to Discord with improved layout
-        
-        Args:
-            jobs: List of jobs to send
-            include_all_weak_matches: If True, include ALL weak matches in the main message (startup run).
-                                     If False, save remaining weak matches for 9:05 AM (scheduled run).
+        """Send formatted job summary to Discord with improved layout.
+        Splits report into 🪙 Crypto / Web3 Jobs and 🚢 Cruise / Maritime IT Jobs sections.
         """
         if not jobs:
             logger.info("No jobs to send to Discord")
@@ -2496,92 +2847,88 @@ class DiscordNotifier:
         # Sort jobs by priority
         sorted_jobs = sorted(jobs, key=lambda x: x.priority.value)
         
-        # Separate by source and priority
-        telegram_jobs = [j for j in sorted_jobs if 'Telegram' in j.source]
-        other_jobs = [j for j in sorted_jobs if 'Telegram' not in j.source]
+        # Split by category for separate Discord sections: Crypto vs Cruise
+        crypto_jobs = [j for j in sorted_jobs if _job_category(j) == "crypto"]
+        cruise_jobs = [j for j in sorted_jobs if _job_category(j) == "cruise"]
         
-        # Group other jobs by priority
-        perfect_matches = [j for j in other_jobs if j.priority == JobPriority.PERFECT_MATCH]
-        good_matches = [j for j in other_jobs if j.priority == JobPriority.GOOD_MATCH]
-        weak_matches = [j for j in other_jobs if j.priority == JobPriority.WEAK_MATCH]
+        # Crypto: separate Telegram, then by priority
+        telegram_jobs = [j for j in crypto_jobs if 'Telegram' in j.source]
+        crypto_other = [j for j in crypto_jobs if 'Telegram' not in j.source]
+        crypto_perfect = [j for j in crypto_other if j.priority == JobPriority.PERFECT_MATCH]
+        crypto_good = [j for j in crypto_other if j.priority == JobPriority.GOOD_MATCH]
+        crypto_weak = [j for j in crypto_other if j.priority == JobPriority.WEAK_MATCH]
         
-        # Group by source for better organization
-        jobs_by_source = {}
-        for job in other_jobs:
-            source = job.source
-            if source not in jobs_by_source:
-                jobs_by_source[source] = []
-            jobs_by_source[source].append(job)
+        # Cruise: by priority only
+        cruise_perfect = [j for j in cruise_jobs if j.priority == JobPriority.PERFECT_MATCH]
+        cruise_good = [j for j in cruise_jobs if j.priority == JobPriority.GOOD_MATCH]
+        cruise_weak = [j for j in cruise_jobs if j.priority == JobPriority.WEAK_MATCH]
         
-        # Build embeds with improved layout
-        embeds = []
-        
-        # Embed 1: Perfect Matches (separate for visibility)
-        if perfect_matches:
-            # Split perfect matches into chunks if too many
-            perfect_chunks = [perfect_matches[i:i + 8] for i in range(0, len(perfect_matches), 8)]
-            for chunk_idx, chunk in enumerate(perfect_chunks):
-                embed = {
-                    "title": "🥇 Perfect Matches" + (f" (Part {chunk_idx + 1})" if len(perfect_chunks) > 1 else ""),
-                    "description": f"**{len(perfect_matches)}** perfect match(es) found!" + (f" - Part {chunk_idx + 1} of {len(perfect_chunks)}" if len(perfect_chunks) > 1 else ""),
-                    "color": 3066993,  # Green
-                    "fields": []
-                }
-                for job in chunk:
-                    # More compact format
-                    title = job.title[:80] + "..." if len(job.title) > 80 else job.title
-                    embed["fields"].append({
-                        "name": f"**{title}**",
-                        "value": f"🏢 {job.company}\n🔗 [View Job]({job.url})\n📍 {job.source}",
-                        "inline": False
-                    })
-                embeds.append(embed)
-        
-        # Embed 2: Good Matches
-        if good_matches:
-            # Split good matches into chunks if too many
-            good_chunks = [good_matches[i:i + 8] for i in range(0, len(good_matches), 8)]
-            for chunk_idx, chunk in enumerate(good_chunks):
-                embed = {
-                    "title": "🥈 Good Matches" + (f" (Part {chunk_idx + 1})" if len(good_chunks) > 1 else ""),
-                    "description": f"**{len(good_matches)}** good match(es) found" + (f" - Part {chunk_idx + 1} of {len(good_chunks)}" if len(good_chunks) > 1 else ""),
-                    "color": 15844367,  # Gold
-                    "fields": []
-                }
-                for job in chunk:
-                    # More compact format
-                    title = job.title[:80] + "..." if len(job.title) > 80 else job.title
-                    embed["fields"].append({
-                        "name": f"**{title}**",
-                        "value": f"🏢 {job.company}\n🔗 [View Job]({job.url})\n📍 {job.source}",
-                        "inline": False
-                    })
-                embeds.append(embed)
-        
-        # Embed 3: Telegram Finds (grouped by channel)
-        if telegram_jobs:
-            # Split Telegram jobs into chunks if too many
-            telegram_chunks = [telegram_jobs[i:i + 10] for i in range(0, len(telegram_jobs), 10)]
-            for chunk_idx, chunk in enumerate(telegram_chunks):
-                embed = {
-                    "title": "📱 Telegram Finds" + (f" (Part {chunk_idx + 1})" if len(telegram_chunks) > 1 else ""),
-                    "description": f"**{len(telegram_jobs)}** job(s) from Telegram" + (f" - Part {chunk_idx + 1} of {len(telegram_chunks)}" if len(telegram_chunks) > 1 else ""),
-                    "color": 3447003,  # Blue
-                    "fields": []
-                }
-                for job in chunk:
-                    # More compact format, truncate long titles
-                    title = job.title[:70] + "..." if len(job.title) > 70 else job.title
-                    embed["fields"].append({
-                        "name": title,
-                        "value": f"[View]({job.url})",
-                        "inline": False
-                    })
-                embeds.append(embed)
-        
-        # Weak matches: Use text format instead of embeds to avoid size limits
-        weak_matches_text = ""
+        # Combined weak for 9:05 AM save (crypto only; cruise weak stays in main message)
+        weak_matches = crypto_weak + cruise_weak
         remaining_weak_matches = []
+        
+        def _add_embeds_for_section(perfect_list, good_list, telegram_list, section_emoji, section_name):
+            out = []
+            prefix = f"{section_emoji} {section_name} – "
+            if perfect_list:
+                chunks = [perfect_list[i:i + 8] for i in range(0, len(perfect_list), 8)]
+                for i, chunk in enumerate(chunks):
+                    embed = {
+                        "title": prefix + "🥇 Perfect Matches" + (f" (Part {i + 1})" if len(chunks) > 1 else ""),
+                        "description": f"**{len(perfect_list)}** perfect match(es)" + (f" - Part {i + 1} of {len(chunks)}" if len(chunks) > 1 else ""),
+                        "color": 3066993,
+                        "fields": []
+                    }
+                    for job in chunk:
+                        title = job.title[:80] + "..." if len(job.title) > 80 else job.title
+                        embed["fields"].append({
+                            "name": f"**{title}**",
+                            "value": f"🏢 {job.company}\n🔗 [View Job]({job.url})\n📍 {job.source}",
+                            "inline": False
+                        })
+                    out.append(embed)
+            if good_list:
+                chunks = [good_list[i:i + 8] for i in range(0, len(good_list), 8)]
+                for i, chunk in enumerate(chunks):
+                    embed = {
+                        "title": prefix + "🥈 Good Matches" + (f" (Part {i + 1})" if len(chunks) > 1 else ""),
+                        "description": f"**{len(good_list)}** good match(es)" + (f" - Part {i + 1} of {len(chunks)}" if len(chunks) > 1 else ""),
+                        "color": 15844367,
+                        "fields": []
+                    }
+                    for job in chunk:
+                        title = job.title[:80] + "..." if len(job.title) > 80 else job.title
+                        embed["fields"].append({
+                            "name": f"**{title}**",
+                            "value": f"🏢 {job.company}\n🔗 [View Job]({job.url})\n📍 {job.source}",
+                            "inline": False
+                        })
+                    out.append(embed)
+            if telegram_list:
+                chunks = [telegram_list[i:i + 10] for i in range(0, len(telegram_list), 10)]
+                for i, chunk in enumerate(chunks):
+                    embed = {
+                        "title": prefix + "📱 Telegram Finds" + (f" (Part {i + 1})" if len(chunks) > 1 else ""),
+                        "description": f"**{len(telegram_list)}** job(s) from Telegram" + (f" - Part {i + 1} of {len(chunks)}" if len(chunks) > 1 else ""),
+                        "color": 3447003,
+                        "fields": []
+                    }
+                    for job in chunk:
+                        title = job.title[:70] + "..." if len(job.title) > 70 else job.title
+                        embed["fields"].append({
+                            "name": title,
+                            "value": f"[View]({job.url})",
+                            "inline": False
+                        })
+                    out.append(embed)
+            return out
+        
+        embeds = []
+        embeds.extend(_add_embeds_for_section(crypto_perfect, crypto_good, telegram_jobs, "🪙", "Crypto / Web3 Jobs"))
+        embeds.extend(_add_embeds_for_section(cruise_perfect, cruise_good, [], "🚢", "Cruise / Maritime IT Jobs"))
+        
+        # Weak matches: Use text format instead of embeds
+        weak_matches_text = ""
         if weak_matches:
             weak_matches_text = f"\n\n**🔍 Other Potential Roles ({len(weak_matches)} weak matches):**\n"
             
@@ -2634,12 +2981,12 @@ class DiscordNotifier:
             if msg_idx == 0:
                 content_text = f"🤖 **Bot Version: {BOT_VERSION}**\n"
                 content_text += f"📊 **Daily Job Scraper Report** - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                content_text += f"**Summary:**\n"
-                content_text += f"🥇 Perfect: {len(perfect_matches)} | "
-                content_text += f"🥈 Good: {len(good_matches)} | "
-                content_text += f"🔍 Weak: {len(weak_matches)}"
+                content_text += f"**🪙 Crypto / Web3:** "
+                content_text += f"🥇 {len(crypto_perfect)} | 🥈 {len(crypto_good)} | 🔍 {len(crypto_weak)}"
                 if telegram_jobs:
-                    content_text += f" | 📱 Telegram: {len(telegram_jobs)}"
+                    content_text += f" | 📱 {len(telegram_jobs)}"
+                content_text += f"\n**🚢 Cruise / Maritime IT:** "
+                content_text += f"🥇 {len(cruise_perfect)} | 🥈 {len(cruise_good)} | 🔍 {len(cruise_weak)}\n"
                 
                 # Add weak matches as text (only in first message)
                 content_text += weak_matches_text
@@ -2719,6 +3066,7 @@ async def scrape_all_jobs() -> List[Job]:
     """Scrape all job sources"""
     all_jobs = []
     scrapers = [
+        # Crypto / Web3
         Web3CareerScraper(),
         CryptoJobsListScraper(),
         CryptocurrencyJobsScraper(),
@@ -2728,7 +3076,13 @@ async def scrape_all_jobs() -> List[Job]:
         WellfoundScraper(),
         # SolanaJobsScraper(),  # Temporarily disabled: site blocks scrapers (403 Forbidden + download triggers)
         DelphiVenturesScraper(),
-        TelegramScraper()
+        TelegramScraper(),
+        # Cruise / Maritime IT
+        CarnivalShipJobsScraper(),
+        AllCruiseJobsScraper(),
+        SelectionPartnersScraper(),
+        PeopleConquestScraper(),
+        DouroAzulScraper(),
     ]
     
     for scraper in scrapers:
@@ -2832,7 +3186,8 @@ def load_remaining_weak_matches() -> List[Job]:
                         source=job_data['source'],
                         priority=JobPriority[job_data['priority']],
                         priority_reason=job_data['priority_reason'],
-                        posted_date=job_data.get('posted_date')
+                        posted_date=job_data.get('posted_date'),
+                        category=job_data.get('category', 'crypto')
                     )
                     jobs.append(job)
             logger.info(f"Loaded {len(jobs)} remaining weak matches from {remaining_file}")
@@ -3240,7 +3595,7 @@ def send_startup_notification():
                       f"⏰ Started at: **{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}**\n"
                       f"📅 Next run: **09:00 AM daily**\n"
                       f"📊 Weak matches follow-up: **09:05 AM daily**\n\n"
-                      f"_Bot is now running and monitoring crypto job boards..._",
+                      f"_Monitoring: 🪙 Crypto/Web3 job boards + 🚢 Cruise/Maritime IT job boards_",
             "embeds": []
         }
         response = requests.post(webhook_url, json=payload, timeout=30)
@@ -3263,8 +3618,14 @@ def main():
     send_startup_notification()
     
     try:
-        # Run immediately on start - show ALL weak matches (is_startup_run=True)
-        run_daily_scrape(is_startup_run=True)
+        # Run immediately on start only if it's before 9:00 AM; otherwise wait until next day
+        now = datetime.now()
+        nine_am_today = now.replace(hour=9, minute=0, second=0, microsecond=0)
+        if now < nine_am_today:
+            # Before 9 AM: run now and show ALL weak matches (is_startup_run=True)
+            run_daily_scrape(is_startup_run=True)
+        else:
+            logger.info("Startup after 09:00 AM - skipping initial run. Next scrape at 09:00 AM tomorrow.")
         
         # Schedule daily runs at 9:00 AM - split weak matches to 9:05 AM (is_startup_run=False)
         schedule.every().day.at("09:00").do(run_daily_scrape, is_startup_run=False)
