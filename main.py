@@ -2040,6 +2040,199 @@ class FindCryptoJobsScraper(JobScraper):
             return None
 
 
+class BondexScraper(JobScraper):
+    """Scraper for Bondex Network jobs (Web3/crypto-focused board)"""
+
+    def __init__(self):
+        super().__init__(
+            "Bondex Network",
+            "https://network.bondex.app",
+            job_list_selector='[data-testid*="job"], a[href*="/jobs/"]',
+            wait_timeout=30000
+        )
+        # Use jobs page with empty search/location to list all jobs
+        self.search_url = "https://network.bondex.app/jobs?search=&location="
+
+    async def scrape(self) -> List[Job]:
+        """Scrape Bondex Network job listings"""
+        jobs: List[Job] = []
+        page: Optional[Page] = None
+        try:
+            logger.info(f"Scraping {self.source_name}...")
+
+            page = await PlaywrightBrowserManager.create_page()
+            await page.goto(self.search_url, wait_until='domcontentloaded', timeout=self.wait_timeout)
+
+            # Wait for job listings to load
+            try:
+                await page.wait_for_selector(
+                    '[data-testid*="job"], a[href*="/jobs/"], [class*="job-card"], [class*="jobCard"]',
+                    timeout=15000
+                )
+            except Exception:
+                logger.warning(f"Timeout waiting for job listings on {self.source_name}")
+
+            # Give some extra time for dynamic content
+            await page.wait_for_timeout(2000)
+
+            # Handle scrolling and potential "Load more" patterns
+            await self.handle_infinite_scroll(page)
+            await self.click_load_more(page)
+
+            content = await page.content()
+            if not content:
+                logger.warning(f"No content retrieved from {self.source_name}")
+                return jobs
+
+            soup = BeautifulSoup(content, 'html.parser')
+
+            job_elements = []
+
+            # Strategy 1: Explicit job test IDs/cards
+            job_elements = soup.select('[data-testid*="job"], [class*="job-card"], [class*="JobCard"]')
+
+            # Strategy 2: Links to individual job pages
+            if not job_elements:
+                job_elements = soup.find_all(
+                    'a',
+                    href=re.compile(r'/jobs/[a-zA-Z0-9\-]+')
+                )
+
+            # Strategy 3: Generic cards that link to /jobs/
+            if not job_elements:
+                job_elements = [
+                    card for card in soup.find_all(['div', 'article', 'li'], class_=re.compile(r'card|job', re.I))
+                    if card.find('a', href=re.compile(r'/jobs/'))
+                ]
+
+            logger.info(f"Found {len(job_elements)} potential job elements from {self.source_name}")
+
+            parsed_count = 0
+            for element in job_elements[:100]:
+                try:
+                    job = self.parse_job(element)
+                    if job:
+                        jobs.append(job)
+                        parsed_count += 1
+                except Exception as e:
+                    logger.warning(f"Error parsing job element on {self.source_name}: {e}")
+                    continue
+
+            logger.info(f"Successfully scraped {parsed_count} jobs from {self.source_name}")
+
+        except Exception as e:
+            logger.error(f"Error scraping {self.source_name}: {e}")
+        finally:
+            if page:
+                await page.close()
+
+        return jobs
+
+    def parse_job(self, element, job_url: str = None) -> Optional[Job]:
+        """Parse a Bondex Network job element"""
+        try:
+            # Determine the anchor element representing the job
+            link_elem = None
+            if element.name == 'a' and element.get('href'):
+                link_elem = element
+            else:
+                link_elem = element.find('a', href=True)
+
+            if not link_elem or not link_elem.get('href'):
+                return None
+
+            href = link_elem['href']
+            # Skip navigation or non-job links
+            if 'search=' in href or 'location=' in href:
+                return None
+
+            if not href.startswith('http'):
+                url = f"{self.base_url}{href}"
+            else:
+                url = href
+
+            # Walk up a few levels to find the full job card container
+            container = element
+            for _ in range(3):
+                if container and container.parent:
+                    container = container.parent
+                else:
+                    break
+
+            if not container:
+                container = element
+
+            # Extract title
+            title = ""
+
+            title_elem = container.find(['h2', 'h3', 'h4'])
+            if not title_elem and link_elem:
+                title_elem = link_elem.find(['h2', 'h3', 'h4'])
+
+            if not title_elem and link_elem:
+                # Sometimes the text on the link itself is the title
+                title = link_elem.get_text(strip=True)
+            elif title_elem:
+                title = title_elem.get_text(strip=True)
+
+            if not title:
+                # Fallback: use a trimmed chunk of container text
+                title = container.get_text(strip=True)[:120]
+
+            if not title or len(title) < 5:
+                return None
+
+            # Skip obvious non-job links
+            lower_title = title.lower()
+            if any(skip in lower_title for skip in ['sign in', 'sign up', 'login', 'download app', 'get the app']):
+                return None
+
+            # Extract company
+            company = "Unknown"
+            company_elem = container.find(
+                ['span', 'div', 'p'],
+                class_=re.compile(r'company|employer|org|organization', re.I)
+            )
+
+            if not company_elem:
+                # Heuristic: second span/div inside the card often holds the company name
+                spans = container.find_all(['span', 'div', 'p'], recursive=True)
+                if len(spans) >= 2:
+                    company = spans[1].get_text(strip=True)
+            else:
+                company = company_elem.get_text(strip=True)
+
+            # Extract description (short summary from the card)
+            description = ""
+            desc_elem = container.find(
+                ['p', 'div'],
+                class_=re.compile(r'description|summary|details|body', re.I)
+            )
+            if desc_elem:
+                description = desc_elem.get_text(strip=True)
+            else:
+                # Fallback: longer snippet from container text
+                description = container.get_text(strip=True, separator=' ')[:500]
+
+            # Rank job using existing crypto JobRanker
+            priority, reason = JobRanker.rank_job(title, description)
+            if priority == JobPriority.BLACKLISTED:
+                return None
+
+            return Job(
+                title=title,
+                company=company,
+                url=url,
+                description=description[:300],
+                source=self.source_name,
+                priority=priority,
+                priority_reason=reason
+            )
+        except Exception as e:
+            logger.warning(f"Error parsing job on {self.source_name}: {e}")
+            return None
+
+
 class RemoteOKScraper(JobScraper):
     """Scraper for RemoteOK - crypto/remote jobs"""
     
@@ -3072,6 +3265,7 @@ async def scrape_all_jobs() -> List[Job]:
         CryptocurrencyJobsScraper(),
         CryptoJobsScraper(),
         FindCryptoJobsScraper(),
+        BondexScraper(),
         RemoteOKScraper(),
         WellfoundScraper(),
         # SolanaJobsScraper(),  # Temporarily disabled: site blocks scrapers (403 Forbidden + download triggers)
