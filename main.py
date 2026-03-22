@@ -1223,226 +1223,113 @@ class CryptocurrencyJobsScraper(JobScraper):
 
 
 class SolanaJobsScraper(JobScraper):
-    """Scraper for Solana jobs board (Getro-powered)"""
-    
+    """Scraper for Solana jobs board (Getro / Next.js).
+
+    The site embeds all job data as JSON inside a __NEXT_DATA__ script tag,
+    so we fetch the HTML with a simple HTTP request (no Playwright needed)
+    and parse the embedded JSON directly.  This is faster and avoids the
+    403 / download-trigger issues that blocked the old Playwright approach.
+    """
+
     def __init__(self):
         super().__init__(
             "Solana Jobs",
             "https://jobs.solana.com",
-            job_list_selector='[class*="job"], [class*="listing"], article',
-            wait_timeout=30000
         )
-        # Use filtered URL for IT roles only
-        self.search_url = "https://jobs.solana.com/jobs?filter=eyJqb2JfZnVuY3Rpb25zIjpbIklUIl19"
+        self.search_url = "https://jobs.solana.com/jobs"
 
     async def scrape(self) -> List[Job]:
-        """Scrape Solana job board with advanced features"""
-        jobs = []
-        page = None
+        jobs: List[Job] = []
         try:
-            logger.info(f"Scraping {self.source_name}...")
-            
-            # Solana Jobs is a JS-heavy SPA, need to use Playwright directly
-            page = await PlaywrightBrowserManager.create_page()
-            
-            # Block downloads to avoid navigation errors
-            page.on("download", lambda download: download.cancel())
-            
-            await page.goto(self.search_url, wait_until='domcontentloaded', timeout=30000)
-            
-            # Wait for job listings to load (Getro boards usually have a loading state)
-            try:
-                await page.wait_for_selector('div[class*="job"], article, li[class*="job"]', timeout=10000)
-            except PlaywrightTimeoutError:
-                logger.warning(f"Timeout waiting for job listings on {self.source_name}")
-            
-            # Wait a bit more for dynamic content
-            await page.wait_for_timeout(3000)
-            
-            # Now handle scroll and load more if needed
-            await self.handle_infinite_scroll(page)
-            
-            # Get the final rendered HTML after interactions
-            content = await page.content()
-            
-            if not content:
-                logger.warning(f"No content retrieved from {self.source_name}")
+            logger.info(f"Scraping {self.source_name} (JSON mode)...")
+            headers = {
+                "User-Agent": random.choice(_USER_AGENTS),
+                "Accept": "text/html,application/xhtml+xml",
+                "Accept-Language": "en-US,en;q=0.9",
+            }
+            resp = requests.get(self.search_url, headers=headers, timeout=20)
+            resp.raise_for_status()
+
+            # Extract __NEXT_DATA__ JSON blob
+            soup = BeautifulSoup(resp.text, "html.parser")
+            script_tag = soup.find("script", id="__NEXT_DATA__")
+            if not script_tag or not script_tag.string:
+                logger.warning(f"__NEXT_DATA__ not found on {self.source_name}")
                 return jobs
-            
-            soup = BeautifulSoup(content, 'html.parser')
-            
-            # Getro boards use specific structure - try multiple strategies
-            job_elements = []
-            
-            # Strategy 1: Look for Getro-specific job cards (usually in a list)
-            job_elements = soup.find_all('li', class_=re.compile(r'job|listing|card|item|result', re.I))
-            
-            # Strategy 2: Article elements (Getro standard)
-            if not job_elements:
-                job_elements = soup.find_all('article')
-            
-            # Strategy 3: Divs with Getro-specific classes
-            if not job_elements:
-                job_elements = soup.find_all('div', class_=re.compile(r'job|listing|card|item|result|position', re.I))
-            
-            # Strategy 4: Look for job links in structured format
-            if not job_elements:
-                job_elements = soup.find_all('a', href=re.compile(r'/jobs/|/job/'))
-            
-            logger.info(f"Found {len(job_elements)} potential job elements from {self.source_name}")
-            
-            if not job_elements:
-                logger.warning("No job elements found. Page might not have loaded correctly.")
-                # Take screenshot for debugging
-                if page:
-                    screenshot_path = f"debug_{self.source_name.replace(' ', '_').replace('.', '_')}.png"
-                    await page.screenshot(path=screenshot_path, full_page=True)
-                    logger.info(f"Debug screenshot saved to {screenshot_path}")
-            
-            parsed_count = 0
-            for element in job_elements[:100]:  # Limit to first 100
+
+            next_data = json.loads(script_tag.string)
+            job_list = (
+                next_data.get("props", {})
+                .get("pageProps", {})
+                .get("initialState", {})
+                .get("jobs", {})
+                .get("found", [])
+            )
+            logger.info(f"Found {len(job_list)} jobs in Solana __NEXT_DATA__")
+
+            for entry in job_list:
                 try:
-                    job = self.parse_job(element)
+                    job = self._parse_entry(entry)
                     if job:
                         jobs.append(job)
-                        parsed_count += 1
                 except Exception as e:
-                    logger.warning(f"Error parsing job element: {e}")
-                    continue
-            logger.info(f"Successfully scraped {parsed_count} jobs from {self.source_name}")
-                    
+                    logger.warning(f"Error parsing Solana job entry: {e}")
+
+            logger.info(f"Successfully scraped {len(jobs)} jobs from {self.source_name}")
         except Exception as e:
             logger.error(f"Error scraping {self.source_name}: {e}")
-        finally:
-            if page:
-                await page.close()
-        
         return jobs
 
-    def parse_job(self, element, job_url: str = None) -> Optional[Job]:
-        """Parse a Solana job element (Getro-powered boards)"""
-        try:
-            # Extract URL first, as it's often the most reliable anchor
-            url = job_url
-            link_elem = element.find('a', href=True)
-            if link_elem and link_elem.get('href'):
-                href = link_elem['href']
-                if not href.startswith('http'):
-                    url = f"{self.base_url}{href}"
-                else:
-                    url = href
-            
-            if not url:
-                # Fallback: try finding a link in parent
-                parent_link = element.find_parent('a', href=True)
-                if parent_link:
-                    href = parent_link['href']
-                    if not href.startswith('http'):
-                        url = f"{self.base_url}{href}"
-                    else:
-                        url = href
-                else:
-                    return None  # Cannot proceed without a URL
-
-            # Extract title
-            title = "Unknown Title"
-            # Strategy 1: Data attribute
-            if element.get('data-job-title'):
-                title = element.get('data-job-title')
-            else:
-                # Strategy 2: Common heading tags
-                title_elem = element.find(['h2', 'h3', 'h4', 'h5'])
-                if title_elem:
-                    title = title_elem.get_text(strip=True)
-                else:
-                    # Strategy 3: Link text
-                    if link_elem:
-                        title = link_elem.get_text(strip=True)
-                    else:
-                        # Strategy 4: Generic text with job-like patterns
-                        text_content = element.get_text('\n', strip=True)
-                        first_line = text_content.split('\n')[0]
-                        if len(first_line) > 5 and len(first_line) < 100:  # Reasonable title length
-                            title = first_line
-            
-            if not title or len(title) < 5:
-                return None
-            
-            # Skip if it's clearly not a job
-            if any(skip in title.lower() for skip in ['subscribe', 'get in touch', 'privacy', 'cookie', 'load more', 'show more']):
-                return None
-            
-            # Extract company name
-            company = "Unknown"
-            # Strategy 1: Data attribute
-            if element.get('data-company-name'):
-                company = element.get('data-company-name')
-            else:
-                # Strategy 2: Common company elements
-                company_elem = element.find(['span', 'div', 'p'], class_=re.compile(r'company|employer|organization|brand', re.I))
-                if company_elem:
-                    company = company_elem.get_text(strip=True)
-                else:
-                    # Strategy 3: Look for company in text
-                    text_parts = element.get_text('\n', strip=True).split('\n')
-                    for part in text_parts[:3]:
-                        if part and len(part) < 50 and part.lower() != title.lower() and not re.search(r'\d{6,}', part):
-                            company = part.strip()
-                            break
-                    # Fallback: try to extract from URL
-                    if company == "Unknown":
-                        try:
-                            domain = urlparse(url).netloc
-                            company = domain.split('.')[0].replace('www', '').capitalize()
-                        except Exception:
-                            pass
-            
-            # Clean up company name (remove IDs, common suffixes)
-            if re.search(r'\d{6,}', company) or company.lower() in ['content', 'unknown', 'read more']:
-                company = "Unknown"
-            
-            # Extract description
-            description = ""
-            # Strategy 1: Data attributes
-            if element.get('data-description'):
-                description = element.get('data-description')
-            else:
-                # Strategy 2: Class-based selectors
-                desc_elem = element.find(['p', 'div', 'span'], class_=re.compile(r'description|summary|excerpt|snippet|text', re.I))
-                if desc_elem:
-                    description = desc_elem.get_text(strip=True)
-            
-            # Fallback: Get all text from element
-            if not description:
-                description = element.get_text(strip=True, separator=' ')[:500]
-            
-            # Extract posted date if available
-            posted_date = None
-            date_elem = element.find(['time', 'span', 'div'], class_=re.compile(r'date|posted|time', re.I))
-            if date_elem:
-                posted_date = date_elem.get_text(strip=True)
-                # Try to get datetime attribute
-                if date_elem.get('datetime'):
-                    posted_date = date_elem.get('datetime')
-            
-            priority, reason = JobRanker.rank_job(title, description)
-            
-            if priority == JobPriority.BLACKLISTED:
-                return None
-            
-            return Job(
-                title=title,
-                company=company,
-                url=url,
-                description=description[:300],
-                source=self.source_name,
-                priority=priority,
-                priority_reason=reason,
-                posted_date=posted_date
-            )
-        except Exception as e:
-            logger.warning(f"Error parsing job: {e}")
+    def _parse_entry(self, entry: dict) -> Optional[Job]:
+        """Parse a single job dict from the Getro JSON payload."""
+        title = entry.get("title", "").strip()
+        if not title or len(title) < 5:
             return None
+
+        # Build URL — prefer the external application link, fall back to board link
+        url = entry.get("url", "")
+        if not url:
+            slug = entry.get("slug", "")
+            url = f"{self.base_url}/jobs/{slug}" if slug else self.base_url
+
+        # Company
+        org = entry.get("organization", {})
+        company = org.get("name", "Unknown")
+
+        # Location + work mode
+        locations = entry.get("locations", [])
+        work_mode = entry.get("workMode", "")
+        location_str = ", ".join(locations[:3]) if locations else "Remote"
+        if work_mode:
+            location_str += f" ({work_mode.replace('_', ' ')})"
+
+        # Seniority (may be null)
+        seniority = entry.get("seniority") or ""
+
+        # Skills as description stand-in
+        skills = entry.get("skills", [])
+        desc_parts = []
+        if seniority:
+            desc_parts.append(f"Seniority: {seniority}")
+        if location_str:
+            desc_parts.append(f"Location: {location_str}")
+        if skills:
+            desc_parts.append(f"Skills: {', '.join(skills[:10])}")
+        description = " | ".join(desc_parts) if desc_parts else title
+
+        priority, reason = JobRanker.rank_job(title, description)
+        if priority == JobPriority.BLACKLISTED:
+            return None
+
+        return Job(
+            title=title,
+            company=company,
+            url=url,
+            description=description[:300],
+            source=self.source_name,
+            priority=priority,
+            priority_reason=reason,
+        )
 
 
 class DelphiVenturesScraper(JobScraper):
@@ -3266,7 +3153,7 @@ async def scrape_all_jobs() -> List[Job]:
         BondexScraper(),
         RemoteOKScraper(),
         WellfoundScraper(),
-        # SolanaJobsScraper(),  # Temporarily disabled: site blocks scrapers (403 Forbidden + download triggers)
+        SolanaJobsScraper(),
         DelphiVenturesScraper(),
         TelegramScraper(),
         # Cruise / Maritime IT
