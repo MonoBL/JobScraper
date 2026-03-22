@@ -6,7 +6,7 @@ Uses Playwright for JavaScript-rendered content.
 """
 
 # Bot version - update this when making significant changes
-BOT_VERSION = "v2.2"
+BOT_VERSION = "v2.3"
 
 import os
 import re
@@ -2992,234 +2992,255 @@ class DouroAzulScraper(JobScraper):
 
 class DiscordNotifier:
     """Send job summaries to Discord via webhook"""
-    
+
+    # Seniority tiers — lower number = shown first
+    _SENIOR_KEYWORDS = [
+        "senior", "sr.", "sr ", "lead", "staff", "principal", "head of",
+        "director", "vp ", "vice president", "chief",
+    ]
+    _JUNIOR_KEYWORDS = [
+        "junior", "jr.", "jr ", "intern", "entry", "associate", "trainee",
+        "apprentice", "graduate",
+    ]
+
+    # Discord embed colours
+    _CLR_PERFECT = 0x2ECC71   # green
+    _CLR_GOOD    = 0x3498DB   # blue
+    _CLR_TELEGRAM = 0x0088CC  # telegram-blue
+    _CLR_WEAK    = 0x95A5A6   # grey
+    _CLR_HEADER  = 0x2F3136   # dark (matches Discord dark theme)
+
     def __init__(self, webhook_url: str):
         self.webhook_url = webhook_url
-    
+
+    # ── helpers ───────────────────────────────────────────────────────
+
+    @staticmethod
+    def _seniority_tier(title: str) -> int:
+        """0 = junior/mid (show first), 1 = unspecified, 2 = senior+ (show last)."""
+        t = title.lower()
+        if any(kw in t for kw in DiscordNotifier._JUNIOR_KEYWORDS):
+            return 0
+        if any(kw in t for kw in DiscordNotifier._SENIOR_KEYWORDS):
+            return 2
+        return 1  # mid / unspecified
+
+    @staticmethod
+    def _sort_by_seniority(jobs: List[Job]) -> List[Job]:
+        """Sort jobs so junior/mid appear first, senior last."""
+        return sorted(jobs, key=lambda j: DiscordNotifier._seniority_tier(j.title))
+
+    @staticmethod
+    def _seniority_label(title: str) -> str:
+        """Return a small label for the seniority tier."""
+        tier = DiscordNotifier._seniority_tier(title)
+        if tier == 0:
+            return "🟢 Junior / Entry"
+        if tier == 2:
+            return "🔴 Senior+"
+        return "🟡 Mid-Level"
+
+    def _send_payload(self, payload: dict):
+        """Send a single payload to Discord with rate-limit awareness."""
+        try:
+            response = requests.post(self.webhook_url, json=payload, timeout=30)
+            # Handle Discord rate limiting
+            if response.status_code == 429:
+                retry_after = response.json().get("retry_after", 2)
+                logger.warning(f"Discord rate limited — waiting {retry_after}s")
+                time.sleep(retry_after)
+                response = requests.post(self.webhook_url, json=payload, timeout=30)
+            response.raise_for_status()
+            return response
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error sending to Discord: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Discord API: {e.response.status_code} - {e.response.text[:500]}")
+            raise
+
+    # ── embed builders ────────────────────────────────────────────────
+
+    def _build_job_field(self, job: Job, show_seniority: bool = True) -> dict:
+        """Build a single embed field for a job."""
+        title = job.title[:75] + "..." if len(job.title) > 75 else job.title
+        company = job.company if job.company != "Unknown" else "—"
+        level = self._seniority_label(job.title) if show_seniority else ""
+        value_parts = [
+            f"🏢  **{company}**",
+            f"📍  {job.source}",
+        ]
+        if level:
+            value_parts.append(f"📊  {level}")
+        value_parts.append(f"🔗  [Apply / View Job]({job.url})")
+        return {
+            "name": f"{title}",
+            "value": "\n".join(value_parts),
+            "inline": False,
+        }
+
+    def _build_telegram_field(self, job: Job) -> dict:
+        """Build a compact embed field for a Telegram job."""
+        # Clean up Telegram titles (often have Company:Title:Location concatenated)
+        title = job.title[:90] + "..." if len(job.title) > 90 else job.title
+        channel = job.source.replace("Telegram (", "").rstrip(")")
+        return {
+            "name": title,
+            "value": f"📱 `#{channel}` · [View Post]({job.url})",
+            "inline": False,
+        }
+
+    def _make_embeds(self, jobs: List[Job], title: str, color: int,
+                     is_telegram: bool = False, max_per_embed: int = 6) -> List[dict]:
+        """Build list of embeds from a job list, chunked to fit Discord limits."""
+        if not jobs:
+            return []
+        chunks = [jobs[i:i + max_per_embed] for i in range(0, len(jobs), max_per_embed)]
+        embeds = []
+        for i, chunk in enumerate(chunks):
+            part = f" ({i + 1}/{len(chunks)})" if len(chunks) > 1 else ""
+            embed = {
+                "title": f"{title}{part}",
+                "color": color,
+                "fields": [],
+            }
+            for job in chunk:
+                if is_telegram:
+                    embed["fields"].append(self._build_telegram_field(job))
+                else:
+                    embed["fields"].append(self._build_job_field(job))
+            # Footer with count
+            embed["footer"] = {"text": f"{len(jobs)} job(s) in this section"}
+            embeds.append(embed)
+        return embeds
+
+    # ── main send ─────────────────────────────────────────────────────
+
     def send_summary(self, jobs: List[Job], include_all_weak_matches: bool = False):
-        """Send formatted job summary to Discord with improved layout.
-        Splits report into 🪙 Crypto / Web3 Jobs and 🚢 Cruise / Maritime IT Jobs sections.
+        """Send formatted job summary to Discord.
+
+        Layout:
+        1. Header message with stats
+        2. Per-category embeds: Perfect > Good, each sorted Junior → Mid → Senior
+        3. Telegram finds (compact)
+        4. Weak matches as text
         """
         if not jobs:
             logger.info("No jobs to send to Discord")
             return
-        
-        # Sort jobs by priority
+
+        # ── split by category ──
         sorted_jobs = sorted(jobs, key=lambda x: x.priority.value)
-        
-        # Split by category for separate Discord sections: Crypto vs Cruise
         crypto_jobs = [j for j in sorted_jobs if _job_category(j) == "crypto"]
         cruise_jobs = [j for j in sorted_jobs if _job_category(j) == "cruise"]
-        
-        # Crypto: separate Telegram, then by priority
+
         telegram_jobs = [j for j in crypto_jobs if 'Telegram' in j.source]
-        crypto_other = [j for j in crypto_jobs if 'Telegram' not in j.source]
-        crypto_perfect = [j for j in crypto_other if j.priority == JobPriority.PERFECT_MATCH]
-        crypto_good = [j for j in crypto_other if j.priority == JobPriority.GOOD_MATCH]
-        crypto_weak = [j for j in crypto_other if j.priority == JobPriority.WEAK_MATCH]
-        
-        # Cruise: by priority only
-        cruise_perfect = [j for j in cruise_jobs if j.priority == JobPriority.PERFECT_MATCH]
-        cruise_good = [j for j in cruise_jobs if j.priority == JobPriority.GOOD_MATCH]
-        cruise_weak = [j for j in cruise_jobs if j.priority == JobPriority.WEAK_MATCH]
-        
-        # Combined weak for 9:05 AM save (crypto only; cruise weak stays in main message)
+        crypto_other  = [j for j in crypto_jobs if 'Telegram' not in j.source]
+
+        crypto_perfect = self._sort_by_seniority([j for j in crypto_other if j.priority == JobPriority.PERFECT_MATCH])
+        crypto_good    = self._sort_by_seniority([j for j in crypto_other if j.priority == JobPriority.GOOD_MATCH])
+        crypto_weak    = [j for j in crypto_other if j.priority == JobPriority.WEAK_MATCH]
+
+        cruise_perfect = self._sort_by_seniority([j for j in cruise_jobs if j.priority == JobPriority.PERFECT_MATCH])
+        cruise_good    = self._sort_by_seniority([j for j in cruise_jobs if j.priority == JobPriority.GOOD_MATCH])
+        cruise_weak    = [j for j in cruise_jobs if j.priority == JobPriority.WEAK_MATCH]
+
         weak_matches = crypto_weak + cruise_weak
         remaining_weak_matches = []
-        
-        def _add_embeds_for_section(perfect_list, good_list, telegram_list, section_emoji, section_name):
-            out = []
-            prefix = f"{section_emoji} {section_name} – "
-            if perfect_list:
-                chunks = [perfect_list[i:i + 8] for i in range(0, len(perfect_list), 8)]
-                for i, chunk in enumerate(chunks):
-                    embed = {
-                        "title": prefix + "🥇 Perfect Matches" + (f" (Part {i + 1})" if len(chunks) > 1 else ""),
-                        "description": f"**{len(perfect_list)}** perfect match(es)" + (f" - Part {i + 1} of {len(chunks)}" if len(chunks) > 1 else ""),
-                        "color": 3066993,
-                        "fields": []
-                    }
-                    for job in chunk:
-                        title = job.title[:80] + "..." if len(job.title) > 80 else job.title
-                        embed["fields"].append({
-                            "name": f"**{title}**",
-                            "value": f"🏢 {job.company}\n🔗 [View Job]({job.url})\n📍 {job.source}",
-                            "inline": False
-                        })
-                    out.append(embed)
-            if good_list:
-                chunks = [good_list[i:i + 8] for i in range(0, len(good_list), 8)]
-                for i, chunk in enumerate(chunks):
-                    embed = {
-                        "title": prefix + "🥈 Good Matches" + (f" (Part {i + 1})" if len(chunks) > 1 else ""),
-                        "description": f"**{len(good_list)}** good match(es)" + (f" - Part {i + 1} of {len(chunks)}" if len(chunks) > 1 else ""),
-                        "color": 15844367,
-                        "fields": []
-                    }
-                    for job in chunk:
-                        title = job.title[:80] + "..." if len(job.title) > 80 else job.title
-                        embed["fields"].append({
-                            "name": f"**{title}**",
-                            "value": f"🏢 {job.company}\n🔗 [View Job]({job.url})\n📍 {job.source}",
-                            "inline": False
-                        })
-                    out.append(embed)
-            if telegram_list:
-                chunks = [telegram_list[i:i + 10] for i in range(0, len(telegram_list), 10)]
-                for i, chunk in enumerate(chunks):
-                    embed = {
-                        "title": prefix + "📱 Telegram Finds" + (f" (Part {i + 1})" if len(chunks) > 1 else ""),
-                        "description": f"**{len(telegram_list)}** job(s) from Telegram" + (f" - Part {i + 1} of {len(chunks)}" if len(chunks) > 1 else ""),
-                        "color": 3447003,
-                        "fields": []
-                    }
-                    for job in chunk:
-                        title = job.title[:70] + "..." if len(job.title) > 70 else job.title
-                        embed["fields"].append({
-                            "name": title,
-                            "value": f"[View]({job.url})",
-                            "inline": False
-                        })
-                    out.append(embed)
-            return out
-        
-        embeds = []
-        embeds.extend(_add_embeds_for_section(crypto_perfect, crypto_good, telegram_jobs, "🪙", "Crypto / Web3 Jobs"))
-        embeds.extend(_add_embeds_for_section(cruise_perfect, cruise_good, [], "🚢", "Cruise / Maritime IT Jobs"))
-        
-        # Weak matches: Use text format instead of embeds
-        weak_matches_text = ""
+
+        # ── 1. Header message ──
+        now_str = datetime.now().strftime("%A, %d %B %Y · %H:%M")
+        total = len(crypto_perfect) + len(crypto_good) + len(crypto_weak) + len(telegram_jobs)
+        total_cruise = len(cruise_perfect) + len(cruise_good) + len(cruise_weak)
+
+        header = f"# 📋 Daily Job Report\n"
+        header += f"> **{now_str}**  ·  Bot **{BOT_VERSION}**\n\n"
+        header += f"**🪙 Crypto / Web3** — "
+        header += f"🥇 {len(crypto_perfect)}  ·  🥈 {len(crypto_good)}  ·  🔍 {len(crypto_weak)}"
+        if telegram_jobs:
+            header += f"  ·  📱 {len(telegram_jobs)}"
+        header += f"  ·  **{total} total**\n"
+        header += f"**🚢 Cruise / Maritime IT** — "
+        header += f"🥇 {len(cruise_perfect)}  ·  🥈 {len(cruise_good)}  ·  🔍 {len(cruise_weak)}"
+        header += f"  ·  **{total_cruise} total**"
+
+        self._send_payload({"content": header, "embeds": []})
+        time.sleep(0.5)
+
+        # ── 2. Crypto embeds ──
+        crypto_embeds = []
+        crypto_embeds.extend(self._make_embeds(
+            crypto_perfect, "🪙  Crypto / Web3 — 🥇 Perfect Matches", self._CLR_PERFECT))
+        crypto_embeds.extend(self._make_embeds(
+            crypto_good, "🪙  Crypto / Web3 — 🥈 Good Matches", self._CLR_GOOD))
+        crypto_embeds.extend(self._make_embeds(
+            telegram_jobs, "🪙  Crypto / Web3 — 📱 Telegram Finds", self._CLR_TELEGRAM,
+            is_telegram=True, max_per_embed=8))
+
+        # ── 3. Cruise embeds ──
+        cruise_embeds = []
+        cruise_embeds.extend(self._make_embeds(
+            cruise_perfect, "🚢  Cruise / Maritime IT — 🥇 Perfect Matches", self._CLR_PERFECT))
+        cruise_embeds.extend(self._make_embeds(
+            cruise_good, "🚢  Cruise / Maritime IT — 🥈 Good Matches", self._CLR_GOOD))
+
+        # ── Send embeds (max 10 per message) ──
+        all_embeds = crypto_embeds + cruise_embeds
+        embed_chunks = [all_embeds[i:i + 10] for i in range(0, len(all_embeds), 10)]
+
+        for chunk in embed_chunks:
+            self._send_payload({"content": "", "embeds": chunk})
+            time.sleep(0.5)
+
+        # ── 4. Weak matches as text ──
         if weak_matches:
-            weak_matches_text = f"\n\n**🔍 Other Potential Roles ({len(weak_matches)} weak matches):**\n"
-            
-            if include_all_weak_matches:
-                # Startup run: Show ALL weak matches in the main message
-                shown_count = 0
-                for job in weak_matches:
-                    title = job.title[:80] + "..." if len(job.title) > 80 else job.title
-                    company = job.company[:30] + "..." if len(job.company) > 30 else job.company
-                    line = f"• {title} @ {company} - [View]({job.url})\n"
-                    # Check if adding this line would exceed limit
-                    if len(weak_matches_text) + len(line) > 1800:
-                        remaining_weak_matches = weak_matches[shown_count:]
-                        remaining = len(remaining_weak_matches)
-                        weak_matches_text += f"\n*... and {remaining} more (see additional message below)*"
-                        break
-                    weak_matches_text += line
-                    shown_count += 1
-            else:
-                # Scheduled run: Show first batch, save remaining for 9:05 AM message
-                shown_count = 0
-                for job in weak_matches:
-                    title = job.title[:80] + "..." if len(job.title) > 80 else job.title
-                    company = job.company[:30] + "..." if len(job.company) > 30 else job.company
-                    line = f"• {title} @ {company} - [View]({job.url})\n"
-                    # Check if adding this line would exceed limit
-                    if len(weak_matches_text) + len(line) > 1800:
-                        remaining_weak_matches = weak_matches[shown_count:]
-                        remaining = len(remaining_weak_matches)
-                        weak_matches_text += f"\n*... and {remaining} more weak matches (will be sent at 9:05 AM)*"
-                        break
-                    weak_matches_text += line
-                    shown_count += 1
-                
-                # Save remaining weak matches to file for 9:05 AM message (only on scheduled runs)
-                if remaining_weak_matches:
-                    save_remaining_weak_matches(remaining_weak_matches)
-        
-        # Discord has a limit of 10 embeds per message and 2000 chars for content
-        # Split into multiple messages if needed
-        max_embeds_per_message = 10
-        embed_chunks = [embeds[i:i + max_embeds_per_message] for i in range(0, len(embeds), max_embeds_per_message)]
-        
-        # If no embeds but we have weak matches, ensure at least one message is sent
-        if not embed_chunks and weak_matches:
-            embed_chunks = [[]]  # Empty embed list, but still sends a message with content
-        
-        for msg_idx, embed_chunk in enumerate(embed_chunks):
-            # Main message header (only on first message)
-            if msg_idx == 0:
-                content_text = f"🤖 **Bot Version: {BOT_VERSION}**\n"
-                content_text += f"📊 **Daily Job Scraper Report** - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                content_text += f"**🪙 Crypto / Web3:** "
-                content_text += f"🥇 {len(crypto_perfect)} | 🥈 {len(crypto_good)} | 🔍 {len(crypto_weak)}"
-                if telegram_jobs:
-                    content_text += f" | 📱 {len(telegram_jobs)}"
-                content_text += f"\n**🚢 Cruise / Maritime IT:** "
-                content_text += f"🥇 {len(cruise_perfect)} | 🥈 {len(cruise_good)} | 🔍 {len(cruise_weak)}\n"
-                
-                # Add weak matches as text (only in first message)
-                content_text += weak_matches_text
-                
-                if len(embed_chunks) > 1:
-                    content_text += f"\n\n*Message {msg_idx + 1} of {len(embed_chunks)}*"
-            else:
-                content_text = f"*Continued... (Message {msg_idx + 1} of {len(embed_chunks)})*"
-            
-            payload = {
-                "content": content_text,
-                "embeds": embed_chunk
-            }
-            
-            try:
-                logger.debug(f"Sending message {msg_idx + 1}/{len(embed_chunks)} to Discord (embeds: {len(embed_chunk)})")
-                response = requests.post(self.webhook_url, json=payload, timeout=30)
-                response.raise_for_status()
-                logger.info(f"Successfully sent message {msg_idx + 1}/{len(embed_chunks)} to Discord (HTTP {response.status_code})")
-                # Small delay between messages to avoid rate limiting
-                if msg_idx < len(embed_chunks) - 1:
-                    import time
-                    time.sleep(1)
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Error sending message {msg_idx + 1} to Discord: {e}")
-                if hasattr(e, 'response') and e.response is not None:
-                    logger.error(f"Discord API response: {e.response.status_code} - {e.response.text[:500]}")
-                raise
-            except Exception as e:
-                logger.error(f"Unexpected error sending message {msg_idx + 1} to Discord: {e}", exc_info=True)
-                raise
-        
-        # More accurate logging
-        total_messages = len(embed_chunks) if embed_chunks else 1  # At least 1 message sent (even if only weak matches)
-        logger.info(f"Successfully sent main response with {len(jobs)} jobs to Discord in {total_messages} message(s)")
-        
-        # Send additional message with remaining weak matches if on startup (include_all_weak_matches=True)
-        if include_all_weak_matches and remaining_weak_matches:
-            # Send immediately as additional message(s)
-            logger.info(f"Sending {len(remaining_weak_matches)} additional weak matches (startup run)...")
-            chunks = []
-            current_chunk = f"**🔍 Weak Matches (continued from above - {len(remaining_weak_matches)} more):**\n\n"
-            
-            for job in remaining_weak_matches:
-                title = job.title[:80] + "..." if len(job.title) > 80 else job.title
+            weak_text = "## 🔍 Other Potential Roles\n"
+            shown_count = 0
+            for job in weak_matches:
+                title = job.title[:75] + "..." if len(job.title) > 75 else job.title
                 company = job.company[:30] + "..." if len(job.company) > 30 else job.company
-                line = f"• {title} @ {company} - [View]({job.url})\n"
-                
-                if len(current_chunk) + len(line) > 1900:
-                    chunks.append(current_chunk)
-                    current_chunk = f"**🔍 Weak Matches (continued):**\n\n{line}"
+                level_dot = "🟢" if self._seniority_tier(job.title) == 0 else ("🔴" if self._seniority_tier(job.title) == 2 else "🟡")
+                line = f"{level_dot} **{title}** @ {company} — [View]({job.url})\n"
+                if len(weak_text) + len(line) > 1850:
+                    remaining_weak_matches = weak_matches[shown_count:]
+                    remaining = len(remaining_weak_matches)
+                    if include_all_weak_matches:
+                        weak_text += f"\n*… and {remaining} more (continued below)*"
+                    else:
+                        weak_text += f"\n*… and {remaining} more (sent at follow-up)*"
+                    break
+                weak_text += line
+                shown_count += 1
+
+            self._send_payload({"content": weak_text, "embeds": []})
+            time.sleep(0.5)
+
+            if not include_all_weak_matches and remaining_weak_matches:
+                save_remaining_weak_matches(remaining_weak_matches)
+
+        # ── 5. Overflow weak matches (startup run) ──
+        if include_all_weak_matches and remaining_weak_matches:
+            logger.info(f"Sending {len(remaining_weak_matches)} additional weak matches...")
+            chunks_text = []
+            current = "## 🔍 Weak Matches (continued)\n"
+            for job in remaining_weak_matches:
+                title = job.title[:75] + "..." if len(job.title) > 75 else job.title
+                company = job.company[:30] + "..." if len(job.company) > 30 else job.company
+                level_dot = "🟢" if self._seniority_tier(job.title) == 0 else ("🔴" if self._seniority_tier(job.title) == 2 else "🟡")
+                line = f"{level_dot} **{title}** @ {company} — [View]({job.url})\n"
+                if len(current) + len(line) > 1900:
+                    chunks_text.append(current)
+                    current = "## 🔍 Weak Matches (continued)\n" + line
                 else:
-                    current_chunk += line
-            
-            if current_chunk:
-                chunks.append(current_chunk)
-            
-            # Send each chunk
-            for chunk_idx, chunk_text in enumerate(chunks):
-                try:
-                    payload = {
-                        "content": chunk_text + (f"\n*Part {chunk_idx + 1} of {len(chunks)}*" if len(chunks) > 1 else ""),
-                        "embeds": []
-                    }
-                    response = requests.post(self.webhook_url, json=payload, timeout=30)
-                    response.raise_for_status()
-                    logger.info(f"Successfully sent additional weak matches message {chunk_idx + 1}/{len(chunks)} (HTTP {response.status_code})")
-                    if chunk_idx < len(chunks) - 1:
-                        time.sleep(1)
-                except Exception as e:
-                    logger.error(f"Error sending additional weak matches message {chunk_idx + 1}: {e}")
+                    current += line
+            if current.strip():
+                chunks_text.append(current)
+            for chunk_text in chunks_text:
+                self._send_payload({"content": chunk_text, "embeds": []})
+                time.sleep(0.5)
         elif not include_all_weak_matches and remaining_weak_matches:
-            logger.info(f"Saved {len(remaining_weak_matches)} remaining weak matches for 9:05 AM message")
+            logger.info(f"Saved {len(remaining_weak_matches)} remaining weak matches for follow-up")
+
+        logger.info(f"Discord report sent — {len(jobs)} jobs total")
 
 
 async def _scrape_single(scraper: JobScraper) -> List[Job]:
