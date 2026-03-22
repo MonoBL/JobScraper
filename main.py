@@ -10,10 +10,13 @@ BOT_VERSION = "v2.2"
 
 import os
 import re
+import sys
 import json
+import signal
 import logging
 import asyncio
 import random
+import argparse
 from datetime import datetime
 from typing import List, Dict, Optional, Set, Tuple
 from dataclasses import dataclass, asdict
@@ -283,12 +286,22 @@ class CruiseJobRanker:
         return JobPriority.BLACKLISTED, "Not IT-related"
 
 
+_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.4; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 Edg/123.0.0.0",
+]
+
+
 class PlaywrightBrowserManager:
     """Manages Playwright browser instance"""
-    
+
     _browser: Optional[Browser] = None
     _playwright = None
-    
+
     @classmethod
     async def get_browser(cls) -> Browser:
         """Get or create browser instance"""
@@ -307,7 +320,7 @@ class PlaywrightBrowserManager:
                 ]
             )
         return cls._browser
-    
+
     @classmethod
     async def close_browser(cls):
         """Close browser instance"""
@@ -317,26 +330,26 @@ class PlaywrightBrowserManager:
         if cls._playwright:
             await cls._playwright.stop()
             cls._playwright = None
-    
+
     @classmethod
     async def create_page(cls) -> Page:
-        """Create a new page with stealth settings"""
+        """Create a new page with stealth settings and a random User-Agent"""
         browser = await cls.get_browser()
-        page = await browser.new_page()
-        
-        # Set realistic user agent
+        ua = random.choice(_USER_AGENTS)
+        page = await browser.new_page(user_agent=ua)
+
         await page.set_extra_http_headers({
             'Accept-Language': 'en-US,en;q=0.9',
         })
         await page.set_viewport_size({"width": 1920, "height": 1080})
-        
+
         # Remove webdriver property
         await page.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', {
                 get: () => undefined
             });
         """)
-        
+
         return page
 
 
@@ -351,6 +364,7 @@ class JobScraper:
         self.wait_timeout = wait_timeout  # Timeout in milliseconds
         self.max_pages = 3  # Maximum pages to scrape (for pagination)
         self.scroll_delay = 2000  # Delay between scrolls (ms)
+        self.max_retries = 2  # Retry page loads on transient failures
 
     async def scrape(self) -> List[Job]:
         """Scrape jobs from the source. Override in subclasses."""
@@ -365,23 +379,23 @@ class JobScraper:
         try:
             last_height = await page.evaluate("document.body.scrollHeight")
             scrolls = 0
-            
+
             while scrolls < max_scrolls:
                 # Scroll to bottom
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 await page.wait_for_timeout(self.scroll_delay)
-                
+
                 # Check if new content loaded
                 new_height = await page.evaluate("document.body.scrollHeight")
                 if new_height == last_height:
                     break  # No new content
-                
+
                 last_height = new_height
                 scrolls += 1
                 logger.debug(f"Scrolled {scrolls} times on {self.source_name}")
         except Exception as e:
             logger.warning(f"Error handling infinite scroll on {self.source_name}: {e}")
-    
+
     async def click_load_more(self, page: Page, button_selector: str = None, max_clicks: int = 5) -> int:
         """Click 'Load More' button if it exists. Returns number of clicks."""
         clicks = 0
@@ -400,7 +414,7 @@ class JobScraper:
                     '[id*="load-more"]',
                     'button[aria-label*="more"]',
                 ])
-                
+
                 clicked = False
                 for selector in selectors:
                     try:
@@ -416,73 +430,12 @@ class JobScraper:
                                 break
                     except Exception:
                         continue
-                
+
                 if not clicked:
                     break  # No more buttons to click
         except Exception as e:
             logger.warning(f"Error clicking load more on {self.source_name}: {e}")
-        
-        return clicks
-    
-    async def handle_infinite_scroll(self, page: Page, max_scrolls: int = 3) -> None:
-        """Handle infinite scroll by scrolling down and waiting for new content"""
-        try:
-            last_height = await page.evaluate("document.body.scrollHeight")
-            scrolls = 0
-            
-            while scrolls < max_scrolls:
-                # Scroll to bottom
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await page.wait_for_timeout(self.scroll_delay)
-                
-                # Check if new content loaded
-                new_height = await page.evaluate("document.body.scrollHeight")
-                if new_height == last_height:
-                    break  # No new content
-                
-                last_height = new_height
-                scrolls += 1
-                logger.debug(f"Scrolled {scrolls} times on {self.source_name}")
-        except Exception as e:
-            logger.warning(f"Error handling infinite scroll on {self.source_name}: {e}")
-    
-    async def click_load_more(self, page: Page, button_selector: str, max_clicks: int = 5) -> int:
-        """Click 'Load More' button if it exists. Returns number of clicks."""
-        clicks = 0
-        try:
-            for _ in range(max_clicks):
-                # Try multiple common selectors for "Load More" buttons
-                selectors = [
-                    button_selector,
-                    'button:has-text("Load More")',
-                    'button:has-text("Show More")',
-                    'a:has-text("Load More")',
-                    '[class*="load-more"]',
-                    '[class*="show-more"]',
-                    '[id*="load-more"]',
-                ]
-                
-                clicked = False
-                for selector in selectors:
-                    try:
-                        button = await page.query_selector(selector)
-                        if button:
-                            is_visible = await button.is_visible()
-                            if is_visible:
-                                await button.click()
-                                await page.wait_for_timeout(2000)  # Wait for content to load
-                                clicks += 1
-                                clicked = True
-                                logger.debug(f"Clicked 'Load More' button on {self.source_name} (click {clicks})")
-                                break
-                    except Exception:
-                        continue
-                
-                if not clicked:
-                    break  # No more buttons to click
-        except Exception as e:
-            logger.warning(f"Error clicking load more on {self.source_name}: {e}")
-        
+
         return clicks
     
     async def extract_job_details(self, page: Page, job_url: str) -> Dict[str, str]:
@@ -545,17 +498,31 @@ class JobScraper:
     async def get_page_content(self, url: str, take_screenshot: bool = False, screenshot_path: str = None, 
                               handle_scroll: bool = False, handle_load_more: bool = False) -> tuple[Optional[str], Optional[Page]]:
         """Get page content after JavaScript rendering with advanced features
-        
+
         Args:
             url: URL to load
             take_screenshot: Whether to take a screenshot
             screenshot_path: Path for screenshot
             handle_scroll: Whether to handle infinite scroll
             handle_load_more: Whether to click "Load More" buttons
-        
+
         Returns:
             tuple: (content, page) - Returns content and page object if take_screenshot is True
         """
+        for attempt in range(1, self.max_retries + 1):
+            result = await self._load_page(url, take_screenshot, screenshot_path, handle_scroll, handle_load_more)
+            content, page = result
+            if content is not None:
+                return result
+            if attempt < self.max_retries:
+                wait = attempt * 3
+                logger.warning(f"Retry {attempt}/{self.max_retries} for {self.source_name} in {wait}s...")
+                await asyncio.sleep(wait)
+        return None, None
+
+    async def _load_page(self, url: str, take_screenshot: bool = False, screenshot_path: str = None,
+                         handle_scroll: bool = False, handle_load_more: bool = False) -> tuple[Optional[str], Optional[Page]]:
+        """Internal: single attempt to load a page and return its content."""
         page = None
         try:
             page = await PlaywrightBrowserManager.create_page()
@@ -1286,7 +1253,7 @@ class SolanaJobsScraper(JobScraper):
             # Wait for job listings to load (Getro boards usually have a loading state)
             try:
                 await page.wait_for_selector('div[class*="job"], article, li[class*="job"]', timeout=10000)
-            except:
+            except PlaywrightTimeoutError:
                 logger.warning(f"Timeout waiting for job listings on {self.source_name}")
             
             # Wait a bit more for dynamic content
@@ -1427,7 +1394,7 @@ class SolanaJobsScraper(JobScraper):
                         try:
                             domain = urlparse(url).netloc
                             company = domain.split('.')[0].replace('www', '').capitalize()
-                        except:
+                        except Exception:
                             pass
             
             # Clean up company name (remove IDs, common suffixes)
@@ -1556,7 +1523,7 @@ class DelphiVenturesScraper(JobScraper):
                     try:
                         await page.screenshot(path="debug_delphi_ventures.png", full_page=True)
                         logger.info("Debug screenshot saved to debug_delphi_ventures.png")
-                    except:
+                    except Exception:
                         pass
             
             for element in job_elements[:50]:  # Increased limit
@@ -1755,7 +1722,7 @@ class CryptoJobsScraper(JobScraper):
             # Wait for job listings to load
             try:
                 await page.wait_for_selector('article, div[class*="job"], li[class*="job"]', timeout=10000)
-            except:
+            except PlaywrightTimeoutError:
                 logger.warning(f"Timeout waiting for job listings on {self.source_name}")
             
             await page.wait_for_timeout(2000)
@@ -1906,7 +1873,7 @@ class FindCryptoJobsScraper(JobScraper):
             # Wait for job listings to load
             try:
                 await page.wait_for_selector('article, div[class*="job"], table', timeout=10000)
-            except:
+            except PlaywrightTimeoutError:
                 logger.warning(f"Timeout waiting for job listings on {self.source_name}")
             
             await page.wait_for_timeout(2000)
@@ -2259,7 +2226,7 @@ class RemoteOKScraper(JobScraper):
             # Wait for job table to load
             try:
                 await page.wait_for_selector('tr.job, table.jobs', timeout=10000)
-            except:
+            except PlaywrightTimeoutError:
                 logger.warning(f"Timeout waiting for job listings on {self.source_name}")
             
             await page.wait_for_timeout(2000)
@@ -2413,7 +2380,7 @@ class WellfoundScraper(JobScraper):
             # Wait for job listings to load
             try:
                 await page.wait_for_selector('div[class*="JobListing"], div[class*="job"], article', timeout=10000)
-            except:
+            except PlaywrightTimeoutError:
                 logger.warning(f"Timeout waiting for job listings on {self.source_name}")
             
             await page.wait_for_timeout(3000)
@@ -3255,9 +3222,19 @@ class DiscordNotifier:
             logger.info(f"Saved {len(remaining_weak_matches)} remaining weak matches for 9:05 AM message")
 
 
+async def _scrape_single(scraper: JobScraper) -> List[Job]:
+    """Run a single scraper with error handling. Returns jobs or empty list on failure."""
+    try:
+        jobs = await scraper.scrape()
+        logger.info(f"Scraped {len(jobs)} jobs from {scraper.source_name}")
+        return jobs
+    except Exception as e:
+        logger.error(f"Failed to scrape {scraper.source_name}: {e}")
+        return []
+
+
 async def scrape_all_jobs() -> List[Job]:
-    """Scrape all job sources"""
-    all_jobs = []
+    """Scrape all job sources concurrently for maximum speed"""
     scrapers = [
         # Crypto / Web3
         Web3CareerScraper(),
@@ -3278,16 +3255,16 @@ async def scrape_all_jobs() -> List[Job]:
         PeopleConquestScraper(),
         DouroAzulScraper(),
     ]
-    
-    for scraper in scrapers:
-        try:
-            jobs = await scraper.scrape()
-            all_jobs.extend(jobs)
-            logger.info(f"Scraped {len(jobs)} jobs from {scraper.source_name}")
-        except Exception as e:
-            logger.error(f"Failed to scrape {scraper.source_name}: {e}")
-            continue
-    
+
+    # Run all scrapers concurrently (massive speed improvement)
+    # Each scraper has its own error handling so one failure won't affect others
+    logger.info(f"Launching {len(scrapers)} scrapers concurrently...")
+    results = await asyncio.gather(*[_scrape_single(s) for s in scrapers])
+
+    all_jobs = []
+    for jobs in results:
+        all_jobs.extend(jobs)
+
     return all_jobs
 
 
@@ -3513,7 +3490,7 @@ def save_seen_jobs(seen_urls: Set[str], seen_titles: Set[str]):
             try:
                 if os.path.exists(temp_file):
                     os.remove(temp_file)
-            except:
+            except Exception:
                 pass
 
 
@@ -3585,7 +3562,7 @@ def acquire_lock() -> bool:
                             logger.warning(f"Removing stale lock file (age: {lock_age:.0f}s)")
                             try:
                                 os.remove(lock_file)
-                            except:
+                            except OSError:
                                 pass  # Another process might have removed it
                             # Wait a bit before retrying
                             if attempt < max_retries - 1:
@@ -3599,7 +3576,7 @@ def acquire_lock() -> bool:
                                     if lock_pid == str(os.getpid()):
                                         logger.warning("Lock file exists but belongs to this process. Reusing.")
                                         return True
-                            except:
+                            except Exception:
                                 pass
                             
                             if attempt < max_retries - 1:
@@ -3799,49 +3776,77 @@ def send_startup_notification():
         logger.error(f"Error sending startup notification to Discord: {e}")
 
 
+_shutdown_requested = False
+
+
+def _handle_signal(signum, frame):
+    """Handle SIGTERM/SIGINT for graceful shutdown."""
+    global _shutdown_requested
+    sig_name = signal.Signals(signum).name
+    logger.info(f"Received {sig_name} — shutting down gracefully...")
+    _shutdown_requested = True
+
+
 def main():
     """Main entry point"""
+    parser = argparse.ArgumentParser(description=f"Job Scraper Bot {BOT_VERSION}")
+    parser.add_argument("--once", action="store_true", help="Run scrapers once then exit (no scheduler)")
+    args = parser.parse_args()
+
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGINT, _handle_signal)
+    signal.signal(signal.SIGTERM, _handle_signal)
+
     # Kill any existing instances first (prevents duplicates from manual starts)
     kill_existing_instances()
-    
-    # Don't acquire lock here - let each scrape run acquire its own lock
-    # This prevents the main process from holding the lock while scheduler runs
+
+    # Read schedule time from env (default 09:00)
+    schedule_time = os.getenv("SCRAPE_SCHEDULE_TIME", "09:00")
+    # Weak-matches follow-up 5 minutes later
+    hh, mm = schedule_time.split(":")
+    followup_time = f"{hh}:{int(mm) + 5:02d}"
+
     logger.info(f"Job Scraper Bot {BOT_VERSION} starting...")
-    
+
     # Send startup notification to Discord
     send_startup_notification()
-    
+
     try:
-        # Run immediately on start only if it's before 9:00 AM; otherwise wait until next day
+        if args.once:
+            # Single run mode — scrape and exit
+            logger.info("Running in --once mode (single scrape then exit)")
+            run_daily_scrape(is_startup_run=True)
+            return
+
+        # Run immediately on start only if it's before the scheduled time
         now = datetime.now()
-        nine_am_today = now.replace(hour=9, minute=0, second=0, microsecond=0)
-        if now < nine_am_today:
-            # Before 9 AM: run now and show ALL weak matches (is_startup_run=True)
+        sched_hour, sched_min = int(hh), int(mm)
+        sched_today = now.replace(hour=sched_hour, minute=sched_min, second=0, microsecond=0)
+        if now < sched_today:
             run_daily_scrape(is_startup_run=True)
         else:
-            logger.info("Startup after 09:00 AM - skipping initial run. Next scrape at 09:00 AM tomorrow.")
-        
-        # Schedule daily runs at 9:00 AM - split weak matches to 9:05 AM (is_startup_run=False)
-        schedule.every().day.at("09:00").do(run_daily_scrape, is_startup_run=False)
-        # Schedule remaining weak matches at 9:05 AM
-        schedule.every().day.at("09:05").do(send_remaining_weak_matches)
-        
-        logger.info("Job scraper started. Will run daily at 09:00 AM")
-        logger.info("Remaining weak matches will be sent at 09:05 AM")
+            logger.info(f"Startup after {schedule_time} — skipping initial run. Next scrape at {schedule_time} tomorrow.")
+
+        # Schedule daily runs
+        schedule.every().day.at(schedule_time).do(run_daily_scrape, is_startup_run=False)
+        schedule.every().day.at(followup_time).do(send_remaining_weak_matches)
+
+        logger.info(f"Scheduled: daily scrape at {schedule_time}, weak-matches follow-up at {followup_time}")
         logger.info("Press Ctrl+C to stop")
-        
-        # Keep the script running
-        try:
-            while True:
-                schedule.run_pending()
-                time.sleep(60)  # Check every minute
-        except KeyboardInterrupt:
-            logger.info("Job scraper stopped by user")
-            # Close browser on exit
-            asyncio.run(PlaywrightBrowserManager.close_browser())
+
+        # Main loop with graceful shutdown support
+        while not _shutdown_requested:
+            schedule.run_pending()
+            time.sleep(60)
+
+        logger.info("Shutdown complete.")
+        asyncio.run(PlaywrightBrowserManager.close_browser())
+
     except Exception as e:
         logger.error(f"Fatal error in main: {e}")
         raise
+    finally:
+        release_lock()
 
 
 if __name__ == "__main__":
