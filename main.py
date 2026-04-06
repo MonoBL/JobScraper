@@ -4026,9 +4026,13 @@ def main():
         logger.info("Press Ctrl+C to stop")
 
         # Main loop with graceful shutdown support
+        # Use short sleep intervals so Ctrl+C is responsive on Windows
         while not _shutdown_requested:
             schedule.run_pending()
-            time.sleep(60)
+            for _ in range(60):
+                if _shutdown_requested:
+                    break
+                time.sleep(1)
 
         logger.info("Shutdown complete.")
         asyncio.run(PlaywrightBrowserManager.close_browser())
