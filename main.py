@@ -6,7 +6,7 @@ Uses Playwright for JavaScript-rendered content.
 """
 
 # Bot version - update this when making significant changes
-BOT_VERSION = "v2.3"
+BOT_VERSION = "v3.0"
 
 import os
 import re
@@ -68,7 +68,7 @@ class Job:
     priority: JobPriority
     priority_reason: str
     posted_date: Optional[str] = None
-    category: str = "crypto"  # "crypto" | "cruise" for Discord section separation
+    category: str = "crypto"  # "crypto" | "cruise" | "general" for Discord section separation
 
     def to_dict(self):
         return {
@@ -93,7 +93,12 @@ class JobRanker:
         "l2 support", "level 2 support", "infrastructure engineer",
         "node operator", "node operations", "site reliability engineer",
         "sre", "sre engineer", "platform engineer", "cloud engineer",
-        "linux engineer", "linux administrator"
+        "linux engineer", "linux administrator",
+        # Automation roles
+        "automation engineer", "qa automation engineer", "test automation engineer",
+        "infrastructure automation", "automation architect",
+        # Product roles (technical)
+        "product engineer", "product operations engineer",
     ]
     
     # Seniority prefixes to ignore when matching titles
@@ -101,7 +106,8 @@ class JobRanker:
     PERFECT_KEYWORDS = {
         'linux': ['linux', 'ubuntu', 'debian', 'centos'],
         'scripting': ['python', 'bash', 'shell scripting', 'shell script'],
-        'infrastructure': ['kubernetes', 'docker', 'terraform', 'ansible', 'ci/cd', 'infrastructure', 'cloud', 'aws', 'gcp', 'azure']
+        'infrastructure': ['kubernetes', 'docker', 'terraform', 'ansible', 'ci/cd', 'infrastructure', 'cloud', 'aws', 'gcp', 'azure'],
+        'automation': ['automation', 'selenium', 'playwright', 'cypress', 'jenkins', 'github actions', 'gitlab ci'],
     }
     
     # Good Match criteria
@@ -110,7 +116,11 @@ class JobRanker:
         "it operations", "operations engineer", "support engineer",
         "customer support engineer", "technical support engineer",
         "solutions architect", "systems architect", "technical architect",
-        "infrastructure architect", "cloud architect"
+        "infrastructure architect", "cloud architect",
+        # Automation / Product roles
+        "automation specialist", "automation developer", "automation tester",
+        "product manager", "technical product manager", "product owner",
+        "product operations", "release engineer", "build engineer",
     ]
     GOOD_KEYWORDS = [
         "hardware", "repair", "network", "networking", "tickets",
@@ -122,12 +132,12 @@ class JobRanker:
     BLACKLIST_TITLES = [
         "senior solidity developer", "marketing manager", "sales manager",
         "hr manager", "human resources manager", "legal counsel", "lawyer", "attorney",
-        "cfo", "cto", "founder", "co-founder", "product manager", "product owner",
+        "cfo", "cto", "founder", "co-founder",
         "ui/ux designer", "content writer", "copywriter", "community manager",
         "social media manager", "influencer", "accountant", "finance manager",
         "affiliate manager", "business development", "bd manager", "legal admin",
         "senior associate", "analyst", "client insights", "sales analytics",
-        "product control", "business operations", "strategy manager", "operations manager",
+        "business operations", "strategy manager",
         "internal audit", "professional practices", "compliance", "regulatory"
     ]
     BLACKLIST_KEYWORDS = [
@@ -136,7 +146,7 @@ class JobRanker:
         "phd required", "masters required", "bachelor's degree required",
         "affiliate", "business development", "bd", "legal", "compliance",
         "audit", "accounting", "finance", "analyst", "sales analytics",
-        "client insights", "product control", "strategy", "operations manager"
+        "client insights", "strategy"
     ]
     
     # Additional filter: filter out clearly non-IT patterns
@@ -200,17 +210,19 @@ class JobRanker:
         has_linux = JobRanker.contains_keywords(combined, JobRanker.PERFECT_KEYWORDS['linux'])
         has_scripting = JobRanker.contains_keywords(combined, JobRanker.PERFECT_KEYWORDS['scripting'])
         has_infra = JobRanker.contains_keywords(combined, JobRanker.PERFECT_KEYWORDS['infrastructure'])
+        has_automation = JobRanker.contains_keywords(combined, JobRanker.PERFECT_KEYWORDS['automation'])
 
-        keyword_count = sum([has_linux, has_scripting, has_infra])
+        keyword_count = sum([has_linux, has_scripting, has_infra, has_automation])
         
         # Perfect match: Strong IT title (like "IT Systems Administrator", "Staff DevOps Engineer") is enough
         # OR title + technical keywords
         if has_perfect_title:
             if keyword_count >= 1:
                 return JobPriority.PERFECT_MATCH, f"Perfect match: Title + {keyword_count} technical keyword(s)"
-            # Strong IT/DevOps/SRE/Platform titles are perfect even without keywords
-            strong_titles = ['system administrator', 'systems administrator', 'sysadmin', 'it administrator', 
-                           'devops', 'sre', 'platform engineer', 'cloud engineer', 'infrastructure engineer']
+            # Strong IT/DevOps/SRE/Platform/Automation titles are perfect even without keywords
+            strong_titles = ['system administrator', 'systems administrator', 'sysadmin', 'it administrator',
+                           'devops', 'sre', 'platform engineer', 'cloud engineer', 'infrastructure engineer',
+                           'automation engineer', 'product engineer']
             if any(term in title_stripped for term in strong_titles):
                 return JobPriority.PERFECT_MATCH, "Perfect match: Strong IT/DevOps/SRE/Platform title"
 
@@ -230,11 +242,12 @@ class JobRanker:
         # Weak Match: Only include jobs with clear technical/IT relevance
         # Must have at least one strong technical keyword
         # Exclude creative/art roles that aren't IT-related
-        technical_keywords = ['support', 'operations', 'infrastructure', 'linux', 'python', 'devops', 
-                             'engineer', 'developer', 'admin', 'sysadmin', 'it', 
+        technical_keywords = ['support', 'operations', 'infrastructure', 'linux', 'python', 'devops',
+                             'engineer', 'developer', 'admin', 'sysadmin', 'it',
                              'network', 'server', 'cloud', 'kubernetes', 'docker', 'monitoring',
                              'systems', 'platform', 'backend', 'frontend', 'sre', 'sre engineer',
-                             'site reliability', 'infrastructure engineer', 'technical support']
+                             'site reliability', 'infrastructure engineer', 'technical support',
+                             'automation', 'product engineer', 'product manager', 'ci/cd', 'pipeline']
         
         # Exclude creative/art roles from technical keywords
         creative_roles = ['artist', 'designer', 'illustrator', 'animator', 'creative', 'ui/ux designer']
@@ -2401,9 +2414,261 @@ class WellfoundScraper(JobScraper):
             return None
 
 
+# ═══════════════════════════════════════════════════════════════════
+# General / Remote scrapers — "normal company" division
+# ═══════════════════════════════════════════════════════════════════
+
+class WeWorkRemotelyScraper(JobScraper):
+    """Scraper for WeWorkRemotely — DevOps / SysAdmin / Automation roles"""
+
+    def __init__(self):
+        super().__init__(
+            "WeWorkRemotely",
+            "https://weworkremotely.com",
+            job_list_selector='section.jobs article li',
+            wait_timeout=30000,
+        )
+        self.search_url = "https://weworkremotely.com/categories/remote-devops-sysadmin-jobs"
+
+    async def scrape(self) -> List[Job]:
+        jobs: List[Job] = []
+        page = None
+        try:
+            logger.info(f"Scraping {self.source_name}...")
+            page = await PlaywrightBrowserManager.create_page()
+            await page.goto(self.search_url, wait_until='domcontentloaded', timeout=30000)
+            try:
+                await page.wait_for_selector('section.jobs li a[href*="/remote-jobs/"]', timeout=10000)
+            except PlaywrightTimeoutError:
+                logger.warning(f"Timeout waiting for job listings on {self.source_name}")
+            await page.wait_for_timeout(2000)
+            content = await page.content()
+            if not content:
+                return jobs
+
+            soup = BeautifulSoup(content, 'html.parser')
+            # WWR lists jobs as <li> inside <section class="jobs">
+            job_elements = soup.select('section.jobs li a[href*="/remote-jobs/"]')
+            if not job_elements:
+                job_elements = soup.select('li a[href*="/remote-jobs/"]')
+
+            logger.info(f"Found {len(job_elements)} potential job elements from {self.source_name}")
+
+            for element in job_elements[:80]:
+                try:
+                    job = self._parse_wwr(element)
+                    if job:
+                        jobs.append(job)
+                except Exception as e:
+                    logger.warning(f"Error parsing WWR job: {e}")
+
+            logger.info(f"Successfully scraped {len(jobs)} jobs from {self.source_name}")
+        except Exception as e:
+            logger.error(f"Error scraping {self.source_name}: {e}")
+        finally:
+            if page:
+                await page.close()
+        return jobs
+
+    def _parse_wwr(self, element) -> Optional[Job]:
+        href = element.get('href', '')
+        if not href or href == '#':
+            return None
+        url = f"{self.base_url}{href}" if not href.startswith('http') else href
+
+        # Title is usually in <span class="title">
+        title_el = element.find('span', class_='title')
+        title = title_el.get_text(strip=True) if title_el else element.get_text(strip=True)
+        if not title or len(title) < 5:
+            return None
+
+        # Company
+        company_el = element.find('span', class_='company')
+        company = company_el.get_text(strip=True) if company_el else "Unknown"
+
+        # Region / extra info
+        region_el = element.find('span', class_='region')
+        region = region_el.get_text(strip=True) if region_el else ""
+
+        description = f"{title} {region}"
+        priority, reason = JobRanker.rank_job(title, description)
+        if priority == JobPriority.BLACKLISTED:
+            return None
+
+        return Job(
+            title=title, company=company, url=url,
+            description=description[:300], source=self.source_name,
+            priority=priority, priority_reason=reason, category="general",
+        )
+
+
+class JobicyScraper(JobScraper):
+    """Scraper for Jobicy — remote-first job board with a public JSON API."""
+
+    API_URL = "https://jobicy.com/api/v2/remote-jobs?count=50&tag=devops,sysadmin,automation,infrastructure,platform+engineer"
+
+    def __init__(self):
+        super().__init__("Jobicy", "https://jobicy.com")
+
+    async def scrape(self) -> List[Job]:
+        jobs: List[Job] = []
+        try:
+            logger.info(f"Scraping {self.source_name} (API)...")
+            headers = {
+                "User-Agent": random.choice(_USER_AGENTS),
+                "Accept": "application/json",
+            }
+            resp = requests.get(self.API_URL, headers=headers, timeout=20)
+            resp.raise_for_status()
+            data = resp.json()
+
+            job_list = data.get("jobs", [])
+            logger.info(f"Found {len(job_list)} jobs from Jobicy API")
+
+            for entry in job_list:
+                try:
+                    job = self._parse_entry(entry)
+                    if job:
+                        jobs.append(job)
+                except Exception as e:
+                    logger.warning(f"Error parsing Jobicy entry: {e}")
+
+            logger.info(f"Successfully scraped {len(jobs)} jobs from {self.source_name}")
+        except Exception as e:
+            logger.error(f"Error scraping {self.source_name}: {e}")
+        return jobs
+
+    def _parse_entry(self, entry: dict) -> Optional[Job]:
+        title = entry.get("jobTitle", "").strip()
+        if not title or len(title) < 5:
+            return None
+
+        url = entry.get("url", "")
+        company = entry.get("companyName", "Unknown")
+        location = entry.get("jobGeo", "Remote")
+        job_type = entry.get("jobType", "")
+        description = f"{title} {location} {job_type}"
+
+        priority, reason = JobRanker.rank_job(title, description)
+        if priority == JobPriority.BLACKLISTED:
+            return None
+
+        return Job(
+            title=title, company=company, url=url,
+            description=description[:300], source=self.source_name,
+            priority=priority, priority_reason=reason, category="general",
+        )
+
+
+class RemoteOKGeneralScraper(JobScraper):
+    """Scraper for RemoteOK — DevOps / SysAdmin / Infra (non-crypto) remote jobs"""
+
+    def __init__(self):
+        super().__init__(
+            "RemoteOK (DevOps)",
+            "https://remoteok.com",
+            job_list_selector='tr.job',
+            wait_timeout=30000,
+        )
+        self.search_url = "https://remoteok.com/remote-devops-jobs"
+
+    async def scrape(self) -> List[Job]:
+        jobs: List[Job] = []
+        page = None
+        try:
+            logger.info(f"Scraping {self.source_name}...")
+            page = await PlaywrightBrowserManager.create_page()
+            await page.goto(self.search_url, wait_until='domcontentloaded', timeout=30000)
+            try:
+                await page.wait_for_selector('tr.job, table.jobs', timeout=10000)
+            except PlaywrightTimeoutError:
+                logger.warning(f"Timeout waiting for job listings on {self.source_name}")
+            await page.wait_for_timeout(2000)
+            await self.handle_infinite_scroll(page)
+
+            content = await page.content()
+            if not content:
+                return jobs
+
+            soup = BeautifulSoup(content, 'html.parser')
+            job_elements = soup.find_all('tr', class_='job')
+            if not job_elements:
+                jobs_table = soup.find('table', class_='jobs')
+                if jobs_table:
+                    job_elements = jobs_table.find_all('tr')[1:]
+
+            logger.info(f"Found {len(job_elements)} potential job elements from {self.source_name}")
+
+            for element in job_elements[:100]:
+                try:
+                    job = self._parse_rok(element)
+                    if job:
+                        jobs.append(job)
+                except Exception as e:
+                    logger.warning(f"Error parsing RemoteOK job: {e}")
+
+            logger.info(f"Successfully scraped {len(jobs)} jobs from {self.source_name}")
+        except Exception as e:
+            logger.error(f"Error scraping {self.source_name}: {e}")
+        finally:
+            if page:
+                await page.close()
+        return jobs
+
+    def _parse_rok(self, element) -> Optional[Job]:
+        if element.get('class') and any(cls in ['header', 'ad', 'separator'] for cls in element.get('class', [])):
+            return None
+
+        url = None
+        link_elem = element.find('a', href=True, itemprop='url')
+        if not link_elem:
+            link_elem = element.find('a', href=True)
+        if link_elem and link_elem.get('href'):
+            href = link_elem['href']
+            url = f"{self.base_url}{href}" if not href.startswith('http') else href
+        if not url:
+            return None
+
+        title = "Unknown Title"
+        title_elem = element.find('h2', itemprop='title')
+        if not title_elem:
+            title_elem = element.find(['h2', 'h3', 'td'], class_=re.compile(r'title|position', re.I))
+        if title_elem:
+            title = title_elem.get_text(strip=True)
+        if not title or len(title) < 5:
+            return None
+
+        company = "Unknown"
+        company_elem = element.find('h3', itemprop='name')
+        if not company_elem:
+            company_elem = element.find(['h3', 'span', 'td'], class_=re.compile(r'company|employer', re.I))
+        if company_elem:
+            company = company_elem.get_text(strip=True)
+
+        description = ""
+        tags_elem = element.find_all(class_='tag')
+        if tags_elem:
+            description = " ".join([tag.get_text(strip=True) for tag in tags_elem])
+        desc_elem = element.find(['p', 'div'], class_=re.compile(r'description|summary', re.I))
+        if desc_elem:
+            description += " " + desc_elem.get_text(strip=True)
+        if not description:
+            description = element.get_text(strip=True, separator=' ')[:500]
+
+        priority, reason = JobRanker.rank_job(title, description)
+        if priority == JobPriority.BLACKLISTED:
+            return None
+
+        return Job(
+            title=title, company=company, url=url,
+            description=description[:300], source=self.source_name,
+            priority=priority, priority_reason=reason, category="general",
+        )
+
+
 class TelegramScraper(JobScraper):
     """Scraper for Telegram channels using web preview"""
-    
+
     def __init__(self):
         super().__init__(
             "Telegram Channels",
@@ -2891,11 +3156,18 @@ class DiscordNotifier:
     ]
 
     # Discord embed colours
-    _CLR_PERFECT = 0x2ECC71   # green
-    _CLR_GOOD    = 0x3498DB   # blue
-    _CLR_TELEGRAM = 0x0088CC  # telegram-blue
-    _CLR_WEAK    = 0x95A5A6   # grey
-    _CLR_HEADER  = 0x2F3136   # dark (matches Discord dark theme)
+    _CLR_PERFECT  = 0x57F287   # bright green
+    _CLR_GOOD     = 0x5865F2   # blurple
+    _CLR_TELEGRAM = 0x0088CC   # telegram-blue
+    _CLR_WEAK     = 0x95A5A6   # grey
+    _CLR_GENERAL  = 0xEB459E   # fuchsia — distinguishes general division
+
+    # Category labels & icons
+    _CAT_META = {
+        "crypto":  ("🪙", "Crypto / Web3"),
+        "cruise":  ("🚢", "Cruise / Maritime IT"),
+        "general": ("💼", "General / Remote"),
+    }
 
     def __init__(self, webhook_url: str):
         self.webhook_url = webhook_url
@@ -2904,34 +3176,37 @@ class DiscordNotifier:
 
     @staticmethod
     def _seniority_tier(title: str) -> int:
-        """0 = junior/mid (show first), 1 = unspecified, 2 = senior+ (show last)."""
+        """0 = junior/entry (show first), 1 = mid/unspecified, 2 = senior+."""
         t = title.lower()
         if any(kw in t for kw in DiscordNotifier._JUNIOR_KEYWORDS):
             return 0
         if any(kw in t for kw in DiscordNotifier._SENIOR_KEYWORDS):
             return 2
-        return 1  # mid / unspecified
+        return 1
 
     @staticmethod
     def _sort_by_seniority(jobs: List[Job]) -> List[Job]:
-        """Sort jobs so junior/mid appear first, senior last."""
         return sorted(jobs, key=lambda j: DiscordNotifier._seniority_tier(j.title))
 
     @staticmethod
+    def _seniority_dot(title: str) -> str:
+        """Single coloured dot for seniority."""
+        tier = DiscordNotifier._seniority_tier(title)
+        return "🟢" if tier == 0 else ("🔴" if tier == 2 else "🟡")
+
+    @staticmethod
     def _seniority_label(title: str) -> str:
-        """Return a small label for the seniority tier."""
         tier = DiscordNotifier._seniority_tier(title)
         if tier == 0:
-            return "🟢 Junior / Entry"
+            return "Junior / Entry"
         if tier == 2:
-            return "🔴 Senior+"
-        return "🟡 Mid-Level"
+            return "Senior+"
+        return "Mid-Level"
 
     def _send_payload(self, payload: dict):
         """Send a single payload to Discord with rate-limit awareness."""
         try:
             response = requests.post(self.webhook_url, json=payload, timeout=30)
-            # Handle Discord rate limiting
             if response.status_code == 429:
                 retry_after = response.json().get("retry_after", 2)
                 logger.warning(f"Discord rate limited — waiting {retry_after}s")
@@ -2947,28 +3222,24 @@ class DiscordNotifier:
 
     # ── embed builders ────────────────────────────────────────────────
 
-    def _build_job_field(self, job: Job, show_seniority: bool = True) -> dict:
-        """Build a single embed field for a job."""
-        title = job.title[:75] + "..." if len(job.title) > 75 else job.title
+    def _build_job_field(self, job: Job) -> dict:
+        """Compact 2-line embed field for a job."""
+        title = job.title[:70] + "..." if len(job.title) > 70 else job.title
+        dot = self._seniority_dot(job.title)
+        level = self._seniority_label(job.title)
         company = job.company if job.company != "Unknown" else "—"
-        level = self._seniority_label(job.title) if show_seniority else ""
-        value_parts = [
-            f"🏢  **{company}**",
-            f"📍  {job.source}",
-        ]
-        if level:
-            value_parts.append(f"📊  {level}")
-        value_parts.append(f"🔗  [Apply / View Job]({job.url})")
         return {
-            "name": f"{title}",
-            "value": "\n".join(value_parts),
+            "name": f"{dot} {title}",
+            "value": (
+                f"🏢 {company}  ·  {dot} {level}\n"
+                f"🔗 [Apply / View Job]({job.url})"
+            ),
             "inline": False,
         }
 
     def _build_telegram_field(self, job: Job) -> dict:
-        """Build a compact embed field for a Telegram job."""
-        # Clean up Telegram titles (often have Company:Title:Location concatenated)
-        title = job.title[:90] + "..." if len(job.title) > 90 else job.title
+        """Compact field for a Telegram job."""
+        title = job.title[:85] + "..." if len(job.title) > 85 else job.title
         channel = job.source.replace("Telegram (", "").rstrip(")")
         return {
             "name": title,
@@ -2977,7 +3248,7 @@ class DiscordNotifier:
         }
 
     def _make_embeds(self, jobs: List[Job], title: str, color: int,
-                     is_telegram: bool = False, max_per_embed: int = 6) -> List[dict]:
+                     is_telegram: bool = False, max_per_embed: int = 8) -> List[dict]:
         """Build list of embeds from a job list, chunked to fit Discord limits."""
         if not jobs:
             return []
@@ -2985,19 +3256,53 @@ class DiscordNotifier:
         embeds = []
         for i, chunk in enumerate(chunks):
             part = f" ({i + 1}/{len(chunks)})" if len(chunks) > 1 else ""
-            embed = {
-                "title": f"{title}{part}",
-                "color": color,
-                "fields": [],
-            }
+            embed = {"title": f"{title}{part}", "color": color, "fields": []}
             for job in chunk:
                 if is_telegram:
                     embed["fields"].append(self._build_telegram_field(job))
                 else:
                     embed["fields"].append(self._build_job_field(job))
-            # Footer with count
             embed["footer"] = {"text": f"{len(jobs)} job(s) in this section"}
             embeds.append(embed)
+        return embeds
+
+    # ── per-category helpers ──────────────────────────────────────────
+
+    def _split_category(self, jobs: List[Job]) -> dict:
+        """Split jobs for a single category into priority buckets."""
+        telegram = [j for j in jobs if 'Telegram' in j.source]
+        other = [j for j in jobs if 'Telegram' not in j.source]
+        return {
+            "perfect": self._sort_by_seniority([j for j in other if j.priority == JobPriority.PERFECT_MATCH]),
+            "good":    self._sort_by_seniority([j for j in other if j.priority == JobPriority.GOOD_MATCH]),
+            "weak":    [j for j in other if j.priority == JobPriority.WEAK_MATCH],
+            "telegram": telegram,
+        }
+
+    def _stat_line(self, icon: str, label: str, buckets: dict) -> str:
+        """Build one stat line for the header."""
+        p, g, w, t = len(buckets["perfect"]), len(buckets["good"]), len(buckets["weak"]), len(buckets["telegram"])
+        total = p + g + w + t
+        line = f"{icon} **{label}** — 🥇 {p} · 🥈 {g} · 🔍 {w}"
+        if t:
+            line += f" · 📱 {t}"
+        line += f" · **{total} total**"
+        return line
+
+    def _build_category_embeds(self, cat_key: str, buckets: dict) -> List[dict]:
+        """Build all embeds for one category (perfect + good + telegram)."""
+        icon, label = self._CAT_META.get(cat_key, ("📌", cat_key.title()))
+        color_perfect = self._CLR_PERFECT
+        color_good = self._CLR_GENERAL if cat_key == "general" else self._CLR_GOOD
+        embeds = []
+        embeds.extend(self._make_embeds(
+            buckets["perfect"], f"{icon}  {label} — 🥇 Perfect Matches", color_perfect))
+        embeds.extend(self._make_embeds(
+            buckets["good"], f"{icon}  {label} — 🥈 Good Matches", color_good))
+        if buckets["telegram"]:
+            embeds.extend(self._make_embeds(
+                buckets["telegram"], f"{icon}  {label} — 📱 Telegram Finds",
+                self._CLR_TELEGRAM, is_telegram=True, max_per_embed=10))
         return embeds
 
     # ── main send ─────────────────────────────────────────────────────
@@ -3005,88 +3310,61 @@ class DiscordNotifier:
     def send_summary(self, jobs: List[Job], include_all_weak_matches: bool = False):
         """Send formatted job summary to Discord.
 
-        Layout:
-        1. Header message with stats
-        2. Per-category embeds: Perfect > Good, each sorted Junior → Mid → Senior
-        3. Telegram finds (compact)
-        4. Weak matches as text
+        Layout per division:
+        1. Header message with stats for all divisions
+        2. Per-division embeds: Perfect > Good > Telegram, sorted by seniority
+        3. Combined weak matches as compact text
         """
         if not jobs:
             logger.info("No jobs to send to Discord")
             return
 
         # ── split by category ──
-        sorted_jobs = sorted(jobs, key=lambda x: x.priority.value)
-        crypto_jobs = [j for j in sorted_jobs if _job_category(j) == "crypto"]
-        cruise_jobs = [j for j in sorted_jobs if _job_category(j) == "cruise"]
+        cats = {}
+        for cat_key in ("crypto", "cruise", "general"):
+            cat_jobs = sorted(
+                [j for j in jobs if _job_category(j) == cat_key],
+                key=lambda x: x.priority.value,
+            )
+            cats[cat_key] = self._split_category(cat_jobs)
 
-        telegram_jobs = [j for j in crypto_jobs if 'Telegram' in j.source]
-        crypto_other  = [j for j in crypto_jobs if 'Telegram' not in j.source]
-
-        crypto_perfect = self._sort_by_seniority([j for j in crypto_other if j.priority == JobPriority.PERFECT_MATCH])
-        crypto_good    = self._sort_by_seniority([j for j in crypto_other if j.priority == JobPriority.GOOD_MATCH])
-        crypto_weak    = [j for j in crypto_other if j.priority == JobPriority.WEAK_MATCH]
-
-        cruise_perfect = self._sort_by_seniority([j for j in cruise_jobs if j.priority == JobPriority.PERFECT_MATCH])
-        cruise_good    = self._sort_by_seniority([j for j in cruise_jobs if j.priority == JobPriority.GOOD_MATCH])
-        cruise_weak    = [j for j in cruise_jobs if j.priority == JobPriority.WEAK_MATCH]
-
-        weak_matches = crypto_weak + cruise_weak
+        # Gather all weak matches across divisions
+        weak_matches = []
+        for buckets in cats.values():
+            weak_matches.extend(buckets["weak"])
         remaining_weak_matches = []
 
-        # ── 1. Header message ──
+        # ── 1. Header ──
         now_str = datetime.now().strftime("%A, %d %B %Y · %H:%M")
-        total = len(crypto_perfect) + len(crypto_good) + len(crypto_weak) + len(telegram_jobs)
-        total_cruise = len(cruise_perfect) + len(cruise_good) + len(cruise_weak)
-
         header = f"# 📋 Daily Job Report\n"
-        header += f"> **{now_str}**  ·  Bot **{BOT_VERSION}**\n\n"
-        header += f"**🪙 Crypto / Web3** — "
-        header += f"🥇 {len(crypto_perfect)}  ·  🥈 {len(crypto_good)}  ·  🔍 {len(crypto_weak)}"
-        if telegram_jobs:
-            header += f"  ·  📱 {len(telegram_jobs)}"
-        header += f"  ·  **{total} total**\n"
-        header += f"**🚢 Cruise / Maritime IT** — "
-        header += f"🥇 {len(cruise_perfect)}  ·  🥈 {len(cruise_good)}  ·  🔍 {len(cruise_weak)}"
-        header += f"  ·  **{total_cruise} total**"
+        header += f"> {now_str}  ·  Bot **{BOT_VERSION}**\n\n"
+        for cat_key in ("crypto", "cruise", "general"):
+            icon, label = self._CAT_META[cat_key]
+            header += self._stat_line(icon, label, cats[cat_key]) + "\n"
 
-        self._send_payload({"content": header, "embeds": []})
+        self._send_payload({"content": header.rstrip(), "embeds": []})
         time.sleep(0.5)
 
-        # ── 2. Crypto embeds ──
-        crypto_embeds = []
-        crypto_embeds.extend(self._make_embeds(
-            crypto_perfect, "🪙  Crypto / Web3 — 🥇 Perfect Matches", self._CLR_PERFECT))
-        crypto_embeds.extend(self._make_embeds(
-            crypto_good, "🪙  Crypto / Web3 — 🥈 Good Matches", self._CLR_GOOD))
-        crypto_embeds.extend(self._make_embeds(
-            telegram_jobs, "🪙  Crypto / Web3 — 📱 Telegram Finds", self._CLR_TELEGRAM,
-            is_telegram=True, max_per_embed=8))
+        # ── 2. Embeds per division ──
+        all_embeds = []
+        for cat_key in ("crypto", "cruise", "general"):
+            all_embeds.extend(self._build_category_embeds(cat_key, cats[cat_key]))
 
-        # ── 3. Cruise embeds ──
-        cruise_embeds = []
-        cruise_embeds.extend(self._make_embeds(
-            cruise_perfect, "🚢  Cruise / Maritime IT — 🥇 Perfect Matches", self._CLR_PERFECT))
-        cruise_embeds.extend(self._make_embeds(
-            cruise_good, "🚢  Cruise / Maritime IT — 🥈 Good Matches", self._CLR_GOOD))
-
-        # ── Send embeds (max 10 per message) ──
-        all_embeds = crypto_embeds + cruise_embeds
-        embed_chunks = [all_embeds[i:i + 10] for i in range(0, len(all_embeds), 10)]
-
-        for chunk in embed_chunks:
-            self._send_payload({"content": "", "embeds": chunk})
+        # Send in chunks of 10 (Discord limit)
+        for i in range(0, len(all_embeds), 10):
+            self._send_payload({"content": "", "embeds": all_embeds[i:i + 10]})
             time.sleep(0.5)
 
-        # ── 4. Weak matches as text ──
+        # ── 3. Weak matches as compact text ──
         if weak_matches:
             weak_text = "## 🔍 Other Potential Roles\n"
             shown_count = 0
             for job in weak_matches:
-                title = job.title[:75] + "..." if len(job.title) > 75 else job.title
-                company = job.company[:30] + "..." if len(job.company) > 30 else job.company
-                level_dot = "🟢" if self._seniority_tier(job.title) == 0 else ("🔴" if self._seniority_tier(job.title) == 2 else "🟡")
-                line = f"{level_dot} **{title}** @ {company} — [View]({job.url})\n"
+                title = job.title[:70] + "..." if len(job.title) > 70 else job.title
+                company = job.company[:25] + "..." if len(job.company) > 25 else job.company
+                dot = self._seniority_dot(job.title)
+                cat_icon = self._CAT_META.get(_job_category(job), ("📌",))[0]
+                line = f"{dot} **{title}** @ {company} {cat_icon} — [View]({job.url})\n"
                 if len(weak_text) + len(line) > 1850:
                     remaining_weak_matches = weak_matches[shown_count:]
                     remaining = len(remaining_weak_matches)
@@ -3104,19 +3382,20 @@ class DiscordNotifier:
             if not include_all_weak_matches and remaining_weak_matches:
                 save_remaining_weak_matches(remaining_weak_matches)
 
-        # ── 5. Overflow weak matches (startup run) ──
+        # ── 4. Overflow weak matches (startup run) ──
         if include_all_weak_matches and remaining_weak_matches:
             logger.info(f"Sending {len(remaining_weak_matches)} additional weak matches...")
             chunks_text = []
-            current = "## 🔍 Weak Matches (continued)\n"
+            current = "## 🔍 Other Potential Roles (continued)\n"
             for job in remaining_weak_matches:
-                title = job.title[:75] + "..." if len(job.title) > 75 else job.title
-                company = job.company[:30] + "..." if len(job.company) > 30 else job.company
-                level_dot = "🟢" if self._seniority_tier(job.title) == 0 else ("🔴" if self._seniority_tier(job.title) == 2 else "🟡")
-                line = f"{level_dot} **{title}** @ {company} — [View]({job.url})\n"
+                title = job.title[:70] + "..." if len(job.title) > 70 else job.title
+                company = job.company[:25] + "..." if len(job.company) > 25 else job.company
+                dot = self._seniority_dot(job.title)
+                cat_icon = self._CAT_META.get(_job_category(job), ("📌",))[0]
+                line = f"{dot} **{title}** @ {company} {cat_icon} — [View]({job.url})\n"
                 if len(current) + len(line) > 1900:
                     chunks_text.append(current)
-                    current = "## 🔍 Weak Matches (continued)\n" + line
+                    current = "## 🔍 Other Potential Roles (continued)\n" + line
                 else:
                     current += line
             if current.strip():
@@ -3162,6 +3441,10 @@ async def scrape_all_jobs() -> List[Job]:
         SelectionPartnersScraper(),
         PeopleConquestScraper(),
         DouroAzulScraper(),
+        # General / Remote
+        WeWorkRemotelyScraper(),
+        JobicyScraper(),
+        RemoteOKGeneralScraper(),
     ]
 
     # Run all scrapers concurrently (massive speed improvement)
@@ -3674,7 +3957,7 @@ def send_startup_notification():
                       f"⏰ Started at: **{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}**\n"
                       f"📅 Next run: **09:00 AM daily**\n"
                       f"📊 Weak matches follow-up: **09:05 AM daily**\n\n"
-                      f"_Monitoring: 🪙 Crypto/Web3 job boards + 🚢 Cruise/Maritime IT job boards_",
+                      f"_Monitoring: 🪙 Crypto/Web3 + 🚢 Cruise/Maritime IT + 💼 General/Remote_",
             "embeds": []
         }
         response = requests.post(webhook_url, json=payload, timeout=30)
