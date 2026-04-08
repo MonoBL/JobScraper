@@ -17,7 +17,7 @@ import logging
 import asyncio
 import random
 import argparse
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Set, Tuple
 from dataclasses import dataclass, asdict
 from enum import Enum
@@ -3203,6 +3203,38 @@ class DiscordNotifier:
             return "Senior+"
         return "Mid-Level"
 
+    @staticmethod
+    def _embed_char_count(embed: dict) -> int:
+        """Count characters in an embed for Discord's 6000-char total limit."""
+        count = len(embed.get("title", ""))
+        count += len(embed.get("description", ""))
+        if "footer" in embed:
+            count += len(embed["footer"].get("text", ""))
+        if "author" in embed:
+            count += len(embed["author"].get("name", ""))
+        for field in embed.get("fields", []):
+            count += len(field.get("name", ""))
+            count += len(field.get("value", ""))
+        return count
+
+    def _send_embeds_batched(self, embeds: List[dict]):
+        """Send embeds in batches respecting Discord's 6000-char and 10-embed limits."""
+        CHAR_LIMIT = 5800  # buffer below Discord's 6000
+        batch: List[dict] = []
+        batch_chars = 0
+        for embed in embeds:
+            ec = self._embed_char_count(embed)
+            if batch and (batch_chars + ec > CHAR_LIMIT or len(batch) >= 10):
+                self._send_payload({"content": "", "embeds": batch})
+                time.sleep(0.5)
+                batch = []
+                batch_chars = 0
+            batch.append(embed)
+            batch_chars += ec
+        if batch:
+            self._send_payload({"content": "", "embeds": batch})
+            time.sleep(0.5)
+
     def _send_payload(self, payload: dict):
         """Send a single payload to Discord with rate-limit awareness."""
         try:
@@ -3350,10 +3382,8 @@ class DiscordNotifier:
         for cat_key in ("crypto", "cruise", "general"):
             all_embeds.extend(self._build_category_embeds(cat_key, cats[cat_key]))
 
-        # Send in chunks of 10 (Discord limit)
-        for i in range(0, len(all_embeds), 10):
-            self._send_payload({"content": "", "embeds": all_embeds[i:i + 10]})
-            time.sleep(0.5)
+        # Send embeds in batches respecting Discord's 6000-char limit
+        self._send_embeds_batched(all_embeds)
 
         # ── 3. Weak matches as compact text ──
         if weak_matches:
@@ -3488,34 +3518,44 @@ def normalize_title(title: str) -> str:
     return normalized.strip()
 
 
-def load_seen_jobs() -> Tuple[Set[str], Set[str]]:
-    """Load seen job URLs and titles from file
-    
+def load_seen_jobs() -> Tuple[Dict[str, str], Dict[str, str]]:
+    """Load seen job URLs and titles from file.
+
     Returns:
-        tuple: (seen_urls_set, seen_titles_set)
+        tuple: (seen_urls_dict {normalized_url: date_str}, seen_titles_dict {normalized_title: date_str})
     """
     seen_jobs_file = 'seen_jobs.json'
-    seen_urls = set()
-    seen_titles = set()
-    
+    seen_urls: Dict[str, str] = {}
+    seen_titles: Dict[str, str] = {}
+    today = datetime.now().strftime("%Y-%m-%d")
+
     try:
         if os.path.exists(seen_jobs_file):
             with open(seen_jobs_file, 'r') as f:
                 data = json.load(f)
-                
-                # Handle both old format (list of URLs) and new format (dict)
+
+                # Handle legacy formats
                 if isinstance(data, list):
-                    # Old format: just URLs
-                    seen_urls = {normalize_url(url) for url in data}
+                    # Old format v1: just a list of URLs
+                    seen_urls = {normalize_url(url): today for url in data}
                 elif isinstance(data, dict):
-                    # New format: {urls: [...], titles: [...]}
-                    seen_urls = {normalize_url(url) for url in data.get('urls', [])}
-                    seen_titles = {normalize_title(title) for title in data.get('titles', [])}
-                
+                    raw_urls = data.get('urls', [])
+                    raw_titles = data.get('titles', [])
+                    # v3 format: urls/titles are dicts {value: date}
+                    if isinstance(raw_urls, dict):
+                        seen_urls = {normalize_url(u): d for u, d in raw_urls.items()}
+                    else:
+                        # v2 format: urls/titles are plain lists
+                        seen_urls = {normalize_url(u): today for u in raw_urls}
+                    if isinstance(raw_titles, dict):
+                        seen_titles = {normalize_title(t): d for t, d in raw_titles.items()}
+                    else:
+                        seen_titles = {normalize_title(t): today for t in raw_titles}
+
                 logger.info(f"Loaded {len(seen_urls)} seen URLs and {len(seen_titles)} seen titles from memory")
     except Exception as e:
         logger.warning(f"Error loading seen_jobs.json: {e}")
-    
+
     return seen_urls, seen_titles
 
 
@@ -3635,21 +3675,20 @@ def send_remaining_weak_matches():
         logger.error(f"Error sending remaining weak matches: {e}")
 
 
-def save_seen_jobs(seen_urls: Set[str], seen_titles: Set[str]):
+def save_seen_jobs(seen_urls: Dict[str, str], seen_titles: Dict[str, str]):
     """Save seen job URLs and titles to file (atomic operation to prevent race conditions)"""
     seen_jobs_file = 'seen_jobs.json'
     temp_file = 'seen_jobs.json.tmp'
     max_retries = 3
-    
-    # Limit size to prevent file from growing too large (keep last 5000)
-    if len(seen_urls) > 5000:
-        seen_urls = set(list(seen_urls)[-5000:])
-    if len(seen_titles) > 5000:
-        seen_titles = set(list(seen_titles)[-5000:])
-    
+
+    # Expire entries older than 30 days
+    cutoff = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    seen_urls = {u: d for u, d in seen_urls.items() if d >= cutoff}
+    seen_titles = {t: d for t, d in seen_titles.items() if d >= cutoff}
+
     data = {
-        'urls': list(seen_urls),
-        'titles': list(seen_titles)
+        'urls': seen_urls,
+        'titles': seen_titles
     }
     
     for attempt in range(max_retries):
@@ -3862,10 +3901,11 @@ async def run_daily_scrape_async(is_startup_run: bool = False):
                 skipped_count += 1
                 continue
             
-            # New job - add to both sets
+            # New job - add to both dicts with today's date
             new_jobs.append(job)
-            seen_urls.add(normalized_url)
-            seen_titles.add(normalized_title)
+            today = datetime.now().strftime("%Y-%m-%d")
+            seen_urls[normalized_url] = today
+            seen_titles[normalized_title] = today
         
         if skipped_count > 0:
             logger.info(f"Skipped {skipped_count} duplicate jobs ({skipped_urls} by URL, {skipped_titles} by title)")
