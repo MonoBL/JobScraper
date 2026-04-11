@@ -100,6 +100,7 @@ def append_jobs_for_date(date_str: str, jobs: List[Dict[str, Any]]) -> None:
         logger.info("Saved %s new job(s) to history for %s", added, date_str)
     except Exception as e:
         logger.error("Failed to write job history: %s", e)
+        raise  # propagate so callers can report the failure
 
 
 def get_jobs_for_date(date_str: str) -> List[Dict[str, Any]]:

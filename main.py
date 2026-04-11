@@ -4087,8 +4087,11 @@ async def run_daily_scrape_async(is_startup_run: bool = False, progress: Optiona
             try:
                 day = datetime.now().strftime("%Y-%m-%d")
                 append_jobs_for_date(day, [j.to_dict() for j in new_jobs])
+                logger.info(f"Saved {len(new_jobs)} jobs to history for {day}")
             except Exception as e:
-                logger.warning("Could not persist job history: %s", e)
+                logger.error("Could not persist job history: %s", e)
+                if progress is not None:
+                    progress["error"] = f"History write failed: {e}"
 
         # Save seen jobs IMMEDIATELY after deduplication (before sending to Discord)
         # This prevents race condition where multiple instances send same jobs
