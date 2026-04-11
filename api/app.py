@@ -28,7 +28,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from job_history import get_jobs_for_date, list_date_summaries, today_iso
-from job_agent import evaluate_job, is_agent_configured
+from job_agent import evaluate_job, is_agent_configured, list_agents
 
 app = FastAPI(title="Job Scraper Dashboard API", version="1.0.0")
 
@@ -44,7 +44,13 @@ app.add_middleware(
 
 @app.get("/api/health")
 def health() -> Dict[str, Any]:
-    return {"ok": True, "agent": is_agent_configured()}
+    agents = list_agents() if is_agent_configured() else []
+    return {
+        "ok": True,
+        "agent": is_agent_configured(),
+        "agents_enabled": is_agent_configured(),
+        "agents": agents,
+    }
 
 
 @app.get("/api/today")
@@ -69,10 +75,19 @@ def jobs_for_date(date: str) -> Dict[str, Any]:
 
 
 class AgentBody(BaseModel):
+    agent_id: str = Field(default="fit", min_length=1)
     title: str = Field(..., min_length=1)
     company: str = ""
     description: str = ""
     url: Optional[str] = None
+
+
+@app.get("/api/agents")
+def agents_list() -> Dict[str, Any]:
+    """Registered agents (models resolved from env)."""
+    if not is_agent_configured():
+        return {"agents": [], "configured": False}
+    return {"agents": list_agents(), "configured": True}
 
 
 @app.post("/api/agent/evaluate")
@@ -80,9 +95,17 @@ def agent_evaluate(body: AgentBody) -> Dict[str, Any]:
     if not is_agent_configured():
         raise HTTPException(
             status_code=503,
-            detail="OPENAI_API_KEY is not set. Add it to .env to enable the agent.",
+            detail="Set OPENROUTER_API_KEY or OPENAI_API_KEY in .env to enable agents.",
         )
-    result = evaluate_job(body.title, body.company, body.description)
+    result = evaluate_job(
+        body.title,
+        body.company,
+        body.description,
+        agent_id=body.agent_id,
+    )
     if result is None:
-        raise HTTPException(status_code=502, detail="Agent request failed")
-    return {"result": result}
+        raise HTTPException(
+            status_code=502,
+            detail="Agent request failed (unknown agent_id or LLM error).",
+        )
+    return {"agent_id": body.agent_id, "result": result}

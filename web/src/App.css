@@ -304,6 +304,52 @@ body {
   cursor: not-allowed;
 }
 
+.agent-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+  margin-top: 0.15rem;
+}
+
+.agent-row .agent-btn {
+  font-size: 0.78rem;
+  padding: 0.3rem 0.55rem;
+}
+
+.agent-subcard {
+  margin-top: 0.55rem;
+  padding: 0.55rem 0.65rem;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(91, 141, 239, 0.2);
+}
+
+.agent-subcard-title {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  font-weight: 600;
+  margin-bottom: 0.35rem;
+}
+
+.agent-kv {
+  font-size: 0.82rem;
+  margin-bottom: 0.35rem;
+}
+
+.agent-kv strong {
+  color: #c5cad3;
+  font-weight: 600;
+  margin-right: 0.35rem;
+}
+
+.agent-kv ul {
+  margin: 0.25rem 0 0;
+  padding-left: 1.1rem;
+}
+
 .agent-box {
   margin-top: 0.65rem;
   padding: 0.65rem 0.75rem;

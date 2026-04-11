@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 
 type JobRow = {
   title: string;
@@ -20,12 +20,104 @@ type DateSummary = {
   weak: number;
 };
 
-type AgentResult = {
-  score: number;
-  fit: string;
-  strengths?: string[];
-  concerns?: string[];
+type AgentMeta = {
+  id: string;
+  label: string;
+  description: string;
+  model: string;
 };
+
+type AgentResultEntry = {
+  data?: Record<string, unknown>;
+  error?: string;
+};
+
+const FALLBACK_AGENTS: AgentMeta[] = [
+  {
+    id: "fit",
+    label: "Role fit",
+    description: "Scores vs DevOps / infra / platform targets.",
+    model: "",
+  },
+  {
+    id: "critique",
+    label: "Posting critique",
+    description: "Skeptical read of the listing.",
+    model: "",
+  },
+  {
+    id: "checklist",
+    label: "Before you apply",
+    description: "Prep and questions before applying.",
+    model: "",
+  },
+];
+
+function renderValue(v: unknown): ReactNode {
+  if (v === null || v === undefined) return null;
+  if (Array.isArray(v)) {
+    return (
+      <ul>
+        {v.map((x, i) => (
+          <li key={i}>{String(x)}</li>
+        ))}
+      </ul>
+    );
+  }
+  if (typeof v === "object") {
+    return (
+      <pre style={{ margin: "0.35rem 0 0", fontSize: "0.78rem", overflow: "auto" }}>
+        {JSON.stringify(v, null, 2)}
+      </pre>
+    );
+  }
+  return <span>{String(v)}</span>;
+}
+
+function AgentPayload({
+  agentId,
+  data,
+}: {
+  agentId: string;
+  data: Record<string, unknown>;
+}) {
+  if (agentId === "fit" && typeof data.score === "number") {
+    const fit = typeof data.fit === "string" ? data.fit : "";
+    return (
+      <>
+        <div className="score">
+          Score: {data.score}/10{fit ? ` — ${fit}` : ""}
+        </div>
+        {data.strengths && Array.isArray(data.strengths) && data.strengths.length > 0 && (
+          <div>
+            <strong>Strengths</strong>
+            {renderValue(data.strengths)}
+          </div>
+        )}
+        {data.concerns && Array.isArray(data.concerns) && data.concerns.length > 0 && (
+          <div>
+            <strong>Concerns</strong>
+            {renderValue(data.concerns)}
+          </div>
+        )}
+      </>
+    );
+  }
+
+  const skip = new Set(["strengths", "concerns", "fit", "score"]);
+  const entries = Object.entries(data).filter(([k]) => !skip.has(k));
+
+  return (
+    <>
+      {entries.map(([k, v]) => (
+        <div key={k} className="agent-kv">
+          <strong>{k.replace(/_/g, " ")}:</strong>
+          {renderValue(v)}
+        </div>
+      ))}
+    </>
+  );
+}
 
 const PRI_ORDER: Record<string, number> = {
   PERFECT_MATCH: 0,
@@ -60,9 +152,17 @@ export default function App() {
   const [jobs, setJobs] = useState<JobRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [jobsErr, setJobsErr] = useState<string | null>(null);
-  const [health, setHealth] = useState<{ ok?: boolean; agent?: boolean }>({});
+  const [health, setHealth] = useState<{
+    ok?: boolean;
+    agent?: boolean;
+    agents_enabled?: boolean;
+    agents?: AgentMeta[];
+  }>({});
+  const [agents, setAgents] = useState<AgentMeta[]>([]);
   const [agentBusy, setAgentBusy] = useState<string | null>(null);
-  const [agentCache, setAgentCache] = useState<Record<string, AgentResult>>({});
+  const [agentResults, setAgentResults] = useState<Record<string, Record<string, AgentResultEntry>>>(
+    {}
+  );
   const [expandedDesc, setExpandedDesc] = useState<Record<string, boolean>>({});
 
   const countByDate = useMemo(() => {
@@ -89,10 +189,23 @@ export default function App() {
     }
   }, []);
 
+  const loadAgents = useCallback(async () => {
+    try {
+      const r = await fetch("/api/agents");
+      if (r.ok) {
+        const data = await r.json();
+        setAgents(data.agents ?? []);
+      }
+    } catch {
+      setAgents([]);
+    }
+  }, []);
+
   useEffect(() => {
     loadHealth();
+    loadAgents();
     loadSummaries().catch(() => setSummaries([]));
-  }, [loadSummaries, loadHealth]);
+  }, [loadSummaries, loadHealth, loadAgents]);
 
   useEffect(() => {
     let cancelled = false;
@@ -155,14 +268,16 @@ export default function App() {
     return cells;
   }, [monthCursor]);
 
-  async function runAgent(job: JobRow) {
-    const key = job.url || job.title;
-    setAgentBusy(key);
+  async function runAgent(job: JobRow, agentId: string) {
+    const jobKey = job.url || job.title;
+    const busyKey = `${jobKey}::${agentId}`;
+    setAgentBusy(busyKey);
     try {
       const r = await fetch("/api/agent/evaluate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          agent_id: agentId,
           title: job.title,
           company: job.company,
           description: job.description,
@@ -171,25 +286,39 @@ export default function App() {
       });
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
-        throw new Error(err.detail || r.statusText);
+        const detail = err.detail;
+        const msg = Array.isArray(detail)
+          ? detail.map((d: { msg?: string }) => d.msg).join(", ")
+          : typeof detail === "string"
+            ? detail
+            : r.statusText;
+        throw new Error(msg || r.statusText);
       }
       const data = await r.json();
-      setAgentCache((prev) => ({ ...prev, [key]: data.result }));
+      const result = data.result as Record<string, unknown>;
+      setAgentResults((prev) => ({
+        ...prev,
+        [jobKey]: {
+          ...(prev[jobKey] || {}),
+          [agentId]: { data: result },
+        },
+      }));
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "Agent failed";
-      setAgentCache((prev) => ({
+      setAgentResults((prev) => ({
         ...prev,
-        [key]: {
-          score: 0,
-          fit: msg,
-          strengths: [],
-          concerns: [],
+        [jobKey]: {
+          ...(prev[jobKey] || {}),
+          [agentId]: { error: msg },
         },
       }));
     } finally {
       setAgentBusy(null);
     }
   }
+
+  const displayAgents = agents.length > 0 ? agents : FALLBACK_AGENTS;
+  const agentsReady = health.agent === true || health.agents_enabled === true;
 
   const todayIso = isoDate(new Date());
 
@@ -262,9 +391,14 @@ export default function App() {
               Jump to today
             </button>
             {health.agent === false && (
-              <span> · Agent: add OPENAI_API_KEY for AI scoring</span>
+              <span> · Agents: set OPENROUTER_API_KEY or OPENAI_API_KEY</span>
             )}
-            {health.agent === true && <span> · Agent ready</span>}
+            {agentsReady && (
+              <span>
+                {" "}
+                · {displayAgents.length} agent{displayAgents.length === 1 ? "" : "s"} configured
+              </span>
+            )}
           </div>
         </div>
 
@@ -304,7 +438,7 @@ export default function App() {
                 : job.priority === "GOOD_MATCH"
                   ? "Good"
                   : "Weak";
-            const agent = agentCache[key];
+            const perAgent = agentResults[key] || {};
             const descOpen = expandedDesc[key];
 
             return (
@@ -325,13 +459,6 @@ export default function App() {
                   </a>
                   <button
                     type="button"
-                    disabled={agentBusy === key}
-                    onClick={() => runAgent(job)}
-                  >
-                    {agentBusy === key ? "Asking AI…" : "Ask AI fit"}
-                  </button>
-                  <button
-                    type="button"
                     className="desc-toggle"
                     onClick={() =>
                       setExpandedDesc((p) => ({ ...p, [key]: !p[key] }))
@@ -340,39 +467,53 @@ export default function App() {
                     {descOpen ? "Hide description" : "Description"}
                   </button>
                 </div>
+                <div className="agent-row">
+                  {displayAgents.map((a) => {
+                    const busyKey = `${key}::${a.id}`;
+                    return (
+                      <button
+                        key={a.id}
+                        type="button"
+                        className="agent-btn"
+                        disabled={!agentsReady || agentBusy === busyKey}
+                        title={
+                          a.model
+                            ? `${a.description || a.label} — ${a.model}`
+                            : a.description || a.label
+                        }
+                        onClick={() => runAgent(job, a.id)}
+                      >
+                        {agentBusy === busyKey ? "…" : a.label}
+                      </button>
+                    );
+                  })}
+                </div>
                 {descOpen && job.description && (
                   <div className="desc-block">{job.description}</div>
                 )}
-                {agent && (
-                  <div className="agent-box">
-                    {agent.score > 0 && (
-                      <div className="score">
-                        Score: {agent.score}/10 — {agent.fit}
+                {displayAgents.map((a) => {
+                  const entry = perAgent[a.id];
+                  if (!entry?.data && !entry?.error) return null;
+                  return (
+                    <div key={a.id} className="agent-box">
+                      <div className="agent-subcard">
+                        <div className="agent-subcard-title">
+                          {a.label}
+                          {a.model ? (
+                            <span style={{ fontWeight: 400, opacity: 0.75 }}>
+                              {" "}
+                              · {a.model}
+                            </span>
+                          ) : null}
+                        </div>
+                        {entry.error && <div className="err">{entry.error}</div>}
+                        {entry.data && (
+                          <AgentPayload agentId={a.id} data={entry.data} />
+                        )}
                       </div>
-                    )}
-                    {agent.score === 0 && <div>{agent.fit}</div>}
-                    {agent.strengths && agent.strengths.length > 0 && (
-                      <div>
-                        <strong>Strengths</strong>
-                        <ul>
-                          {agent.strengths.map((s) => (
-                            <li key={s}>{s}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-                    {agent.concerns && agent.concerns.length > 0 && (
-                      <div>
-                        <strong>Concerns</strong>
-                        <ul>
-                          {agent.concerns.map((s) => (
-                            <li key={s}>{s}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-                  </div>
-                )}
+                    </div>
+                  );
+                })}
               </article>
             );
           })}
