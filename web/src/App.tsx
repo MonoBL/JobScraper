@@ -204,6 +204,7 @@ export default function App({ initialView = "dashboard" }: AppProps) {
   const [authPhase, setAuthPhase] = useState<"loading" | "login" | "ready">("loading");
   const [requireLogin, setRequireLogin] = useState(false);
   const [monthCursor, setMonthCursor] = useState(() => startOfMonth(new Date()));
+  const [serverToday, setServerToday] = useState<string | null>(null);
   const [selectedDate, setSelectedDate] = useState(() => isoDate(new Date()));
   const [summaries, setSummaries] = useState<DateSummary[]>([]);
   const [jobs, setJobs] = useState<JobRow[]>([]);
@@ -653,6 +654,17 @@ export default function App({ initialView = "dashboard" }: AppProps) {
     loadSummaries().catch(() => setSummaries([]));
     void loadSchedule();
     void loadProfile();
+    // Sync "today" to server date (avoids client/server timezone mismatch)
+    apiFetch("/api/today")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d: { date?: string } | null) => {
+        if (d?.date) {
+          setServerToday(d.date);
+          setSelectedDate(d.date);
+          setMonthCursor(startOfMonth(parseISODate(d.date)));
+        }
+      })
+      .catch(() => undefined);
   }, [authPhase, loadSummaries, refreshDashboardStatus, loadSchedule, loadProfile]);
 
   useEffect(() => {
@@ -961,7 +973,7 @@ export default function App({ initialView = "dashboard" }: AppProps) {
   /** Only disable LLM actions when health explicitly reports no API key — not while loading or on fetch failure. */
   const llmDisabled = health.agent === false;
 
-  const todayIso = isoDate(new Date());
+  const todayIso = serverToday ?? isoDate(new Date());
 
   if (authPhase === "loading") {
     return (
