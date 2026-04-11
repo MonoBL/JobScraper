@@ -164,6 +164,11 @@ export default function App() {
     {}
   );
   const [expandedDesc, setExpandedDesc] = useState<Record<string, boolean>>({});
+  const [scrapeNowEnabled, setScrapeNowEnabled] = useState(false);
+  const [scrapeCode, setScrapeCode] = useState("");
+  const [scrapeBusy, setScrapeBusy] = useState(false);
+  const [scrapeMsg, setScrapeMsg] = useState<string | null>(null);
+  const [jobsRefresh, setJobsRefresh] = useState(0);
 
   const countByDate = useMemo(() => {
     const m = new Map<string, number>();
@@ -205,6 +210,10 @@ export default function App() {
     loadHealth();
     loadAgents();
     loadSummaries().catch(() => setSummaries([]));
+    fetch("/api/scrape-now/config")
+      .then((r) => r.json())
+      .then((d: { enabled?: boolean }) => setScrapeNowEnabled(!!d.enabled))
+      .catch(() => setScrapeNowEnabled(false));
   }, [loadSummaries, loadHealth, loadAgents]);
 
   useEffect(() => {
@@ -236,7 +245,40 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedDate]);
+  }, [selectedDate, jobsRefresh]);
+
+  async function triggerScrapeNow() {
+    setScrapeMsg(null);
+    setScrapeBusy(true);
+    try {
+      const r = await fetch("/api/scrape-now", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: scrapeCode }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        const det = data.detail;
+        const msg =
+          typeof det === "string"
+            ? det
+            : Array.isArray(det)
+              ? det.map((x: { msg?: string }) => x.msg).filter(Boolean).join(", ")
+              : r.statusText;
+        throw new Error(msg || r.statusText);
+      }
+      setScrapeMsg(typeof data.detail === "string" ? data.detail : "Scrape started.");
+      setScrapeCode("");
+      window.setTimeout(() => {
+        loadSummaries().catch(() => undefined);
+        setJobsRefresh((x) => x + 1);
+      }, 90_000);
+    } catch (e: unknown) {
+      setScrapeMsg(e instanceof Error ? e.message : "Request failed");
+    } finally {
+      setScrapeBusy(false);
+    }
+  }
 
   const monthLabel = monthCursor.toLocaleString("default", {
     month: "long",
@@ -325,14 +367,34 @@ export default function App() {
   return (
     <div>
       <header className="app-header">
-        <h1>Job Scraper</h1>
-        <p>
-          Today’s matches and past days on the calendar. Ranking fixes live in{" "}
-          <code style={{ fontFamily: "JetBrains Mono, monospace", fontSize: "0.88em" }}>
-            main.py
-          </code>{" "}
-          (JobRanker).
-        </p>
+        <div className="app-header-top">
+          <div>
+            <h1>Job Scraper</h1>
+            <p>
+              Today’s matches and past days on the calendar. Ranking fixes live in{" "}
+              <code style={{ fontFamily: "JetBrains Mono, monospace", fontSize: "0.88em" }}>
+                main.py
+              </code>{" "}
+              (JobRanker).
+            </p>
+          </div>
+          {scrapeNowEnabled && (
+            <div className="scrape-now">
+              <input
+                type="password"
+                name="scrape-code"
+                autoComplete="off"
+                placeholder="Scrape code"
+                value={scrapeCode}
+                onChange={(e) => setScrapeCode(e.target.value)}
+              />
+              <button type="button" disabled={scrapeBusy} onClick={() => void triggerScrapeNow()}>
+                {scrapeBusy ? "Starting…" : "Scrape now"}
+              </button>
+            </div>
+          )}
+        </div>
+        {scrapeMsg && <p className="scrape-msg">{scrapeMsg}</p>}
       </header>
 
       <div className="layout">
@@ -419,8 +481,12 @@ export default function App() {
           {!loading && !jobsErr && jobs.length === 0 && (
             <p className="empty">
               No jobs stored for this day yet. History is written when the scraper finds{" "}
-              <strong>new</strong> listings (run <code>python main.py --once</code>). Days before
-              this change have no archive.
+              <strong>new</strong> listings
+              {scrapeNowEnabled
+                ? " (use Scrape now above, or wait for the scheduled run)."
+                : " (scheduled run or CLI: python main.py --once)."}
+              {" "}
+              Days before this change have no archive.
             </p>
           )}
 

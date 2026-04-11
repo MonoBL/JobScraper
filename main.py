@@ -3770,9 +3770,13 @@ def save_seen_jobs(seen_urls: Dict[str, str], seen_titles: Dict[str, str]):
 
 
 def get_lock_file_path() -> str:
-    """Get absolute path to lock file (based on script directory)"""
+    """Lock file path — under JOB_SCRAPER_STATE_DIR when set so Docker API + scraper share one lock."""
+    base = os.getenv("JOB_SCRAPER_STATE_DIR", "").strip()
+    if base:
+        os.makedirs(base, exist_ok=True)
+        return os.path.join(base, "job_scraper.lock")
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(script_dir, 'job_scraper.lock')
+    return os.path.join(script_dir, "job_scraper.lock")
 
 
 def kill_existing_instances():
