@@ -1278,30 +1278,34 @@ export default function App({ initialView = "dashboard" }: AppProps) {
                     {descOpen ? "Hide description" : "Description"}
                   </button>
                 </div>
-                {!llmDisabled && (
-                  <div className="agent-row">
+                <div className="agent-row">
                     <span className="agent-row-label">AI analysis</span>
-                    {displayAgents.map((a) => {
-                      const busyKey = `${key}::${a.id}`;
-                      const isBusy = agentBusy === busyKey;
-                      const anyBusy = agentBusy !== null && agentBusy.startsWith(`${key}::`);
-                      return (
-                        <button
-                          key={a.id}
-                          type="button"
-                          className="agent-btn"
-                          disabled={anyBusy}
-                          onClick={() => runAgent(job, a.id)}
-                        >
-                          <span className="agent-btn-label">{isBusy ? "Thinking…" : a.label}</span>
-                          {!isBusy && a.description && (
-                            <span className="agent-btn-desc">{a.description}</span>
-                          )}
-                        </button>
-                      );
-                    })}
+                    {llmDisabled ? (
+                      <span className="agent-no-key">
+                        Set <code>OPENROUTER_API_KEY</code> in .env to enable
+                      </span>
+                    ) : (
+                      displayAgents.map((a) => {
+                        const busyKey = `${key}::${a.id}`;
+                        const isBusy = agentBusy === busyKey;
+                        const anyBusy = agentBusy !== null && agentBusy.startsWith(`${key}::`);
+                        return (
+                          <button
+                            key={a.id}
+                            type="button"
+                            className="agent-btn"
+                            disabled={anyBusy}
+                            onClick={() => runAgent(job, a.id)}
+                          >
+                            <span className="agent-btn-label">{isBusy ? "Thinking…" : a.label}</span>
+                            {!isBusy && a.description && (
+                              <span className="agent-btn-desc">{a.description}</span>
+                            )}
+                          </button>
+                        );
+                      })
+                    )}
                   </div>
-                )}
                 {descOpen && job.description && (
                   <div className="desc-block">{job.description}</div>
                 )}
