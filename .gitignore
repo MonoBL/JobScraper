@@ -35,3 +35,10 @@ seen_jobs.json
 debug_*.png
 job_scraper.lock
 
+# Job history for dashboard (local)
+data/
+
+# Frontend
+web/node_modules/
+web/dist/
+

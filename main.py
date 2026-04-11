@@ -30,6 +30,8 @@ import schedule
 import time
 from pydantic import BaseModel, HttpUrl
 
+from job_history import append_jobs_for_date
+
 # Try to load .env file if python-dotenv is available
 try:
     from dotenv import load_dotenv
@@ -129,34 +131,47 @@ class JobRanker:
     ]
     
     # Blacklist - filter out non-IT roles more strictly
+    # Substring match on job title only — avoid bare words like "analyst" (hits "systems analyst")
     BLACKLIST_TITLES = [
         "senior solidity developer", "marketing manager", "sales manager",
         "hr manager", "human resources manager", "legal counsel", "lawyer", "attorney",
-        "cfo", "cto", "founder", "co-founder",
         "ui/ux designer", "content writer", "copywriter", "community manager",
         "social media manager", "influencer", "accountant", "finance manager",
-        "affiliate manager", "business development", "bd manager", "legal admin",
-        "senior associate", "analyst", "client insights", "sales analytics",
+        "affiliate manager", "bd manager", "legal admin",
+        "senior associate", "client insights", "sales analytics",
         "business operations", "strategy manager",
-        "internal audit", "professional practices", "compliance", "regulatory"
+        "internal audit", "professional practices", "compliance officer", "regulatory affairs",
     ]
-    BLACKLIST_KEYWORDS = [
+
+    # Title-only: avoid false positives from JD text ("work with marketing team", etc.)
+    IRRELEVANT_TITLE_PATTERNS = [
+        r'\b(head|director|vp|vice president)\s+of\s+(marketing|sales|finance|people|hr|legal|operations)\b',
+        r'\b(chief)\s+(marketing|sales|financial|people|hr|revenue|commercial|product|strategy)\s+(officer|officers)\b',
+        r'\b(affiliate|partnerships)\s+(manager|lead|head|director)\b',
+        r'\b(business development|account executive|sales executive)\b',
+        r'\b(senior associate|equity researcher)\b',
+        r'\b(data analyst|business analyst|financial analyst|research analyst)\b',
+    ]
+    # Strict requirements — safe on full text (title + description)
+    IRRELEVANT_COMBINED_PATTERNS = [
+        r'\b(15|20)\+?\s*years?\s+of?\s+experience',
+        r'\b(phd|doctorate)\s+required\b',
+        r'\bmasters?\s+degree\s+required\b',
+    ]
+    # Short terms that appear in unrelated sentences in long JDs — check title only
+    BLACKLIST_KEYWORDS_TITLE = [
         "senior solidity", "marketing manager", "sales manager",
-        "hr manager", "legal counsel", "10+ years experience", "15+ years",
-        "phd required", "masters required", "bachelor's degree required",
-        "affiliate", "business development", "bd", "legal", "compliance",
-        "audit", "accounting", "finance", "analyst", "sales analytics",
-        "client insights", "strategy"
+        "hr manager", "human resources", "talent acquisition",
+        "legal counsel", "affiliate manager",
+        "business development manager", "bd manager",
+        "account executive", "sales executive",
+        "data analyst", "business analyst", "financial analyst",
+        "strategy manager", "product marketing",
+        "chief marketing", "chief financial", "chief people",
     ]
-    
-    # Additional filter: filter out clearly non-IT patterns
-    IRRELEVANT_PATTERNS = [
-        r'\b(chief|founder|co-founder|cto|ceo|cfo)\s+\w+',
-        r'\b(15|20)\+?\s*years?\s+experience',
-        r'\b(phd|masters?)\s+required',
-        r'\b(marketing|sales|legal|finance|accounting|compliance|audit|regulatory)\s+\w+',
-        r'\b(affiliate|business development|bd)\s+\w+',
-        r'\b(senior associate|analyst|insights|analytics)\s+\w+',
+    BLACKLIST_KEYWORDS_FULLTEXT = [
+        "10+ years experience", "12+ years", "15+ years", "20+ years",
+        "phd required", "doctorate required",
     ]
 
     @staticmethod
@@ -191,17 +206,37 @@ class JobRanker:
         desc_lower = JobRanker.normalize_text(description)
         combined = f"{title_lower} {desc_lower}"
 
-        # Check blacklist patterns first (regex-based)
-        for pattern in JobRanker.IRRELEVANT_PATTERNS:
-            if re.search(pattern, combined, re.IGNORECASE):
-                return JobPriority.BLACKLISTED, f"Matches irrelevant pattern: {pattern}"
+        # Irrelevant roles — regex on title only (JD mentions other departments often)
+        for pattern in JobRanker.IRRELEVANT_TITLE_PATTERNS:
+            if re.search(pattern, title_lower, re.IGNORECASE):
+                return JobPriority.BLACKLISTED, f"Title matches irrelevant pattern: {pattern}"
 
-        # Check blacklist titles/keywords
-        if JobRanker.contains_keywords(combined, JobRanker.BLACKLIST_TITLES):
-            return JobPriority.BLACKLISTED, "Contains blacklisted title/keyword"
-        
-        if JobRanker.contains_keywords(combined, JobRanker.BLACKLIST_KEYWORDS):
-            return JobPriority.BLACKLISTED, "Contains blacklisted keyword"
+        if ("co-founder" in title_lower or "cofounder" in title_lower) and not any(
+            t in title_lower
+            for t in (
+                "engineer",
+                "developer",
+                "devops",
+                "technical",
+                "infrastructure",
+                "platform",
+                "sre",
+                "cto",
+            )
+        ):
+            return JobPriority.BLACKLISTED, "Non-technical founder/co-founder role"
+
+        for pattern in JobRanker.IRRELEVANT_COMBINED_PATTERNS:
+            if re.search(pattern, combined, re.IGNORECASE):
+                return JobPriority.BLACKLISTED, f"Matches strict requirement pattern: {pattern}"
+
+        # Blacklist phrases — titles are checked on job title; long phrases on full text
+        if JobRanker.contains_keywords(title_lower, JobRanker.BLACKLIST_TITLES):
+            return JobPriority.BLACKLISTED, "Blacklisted job title phrase"
+        if JobRanker.contains_keywords(title_lower, JobRanker.BLACKLIST_KEYWORDS_TITLE):
+            return JobPriority.BLACKLISTED, "Blacklisted title keyword"
+        if JobRanker.contains_keywords(combined, JobRanker.BLACKLIST_KEYWORDS_FULLTEXT):
+            return JobPriority.BLACKLISTED, "Blacklisted requirement phrase"
 
         # Check Perfect Match (need title + at least 1 keyword, OR just a strong IT title)
         # Strip seniority prefixes for better matching (e.g., "Staff DevOps Engineer" -> "DevOps Engineer")
@@ -222,7 +257,8 @@ class JobRanker:
             # Strong IT/DevOps/SRE/Platform/Automation titles are perfect even without keywords
             strong_titles = ['system administrator', 'systems administrator', 'sysadmin', 'it administrator',
                            'devops', 'sre', 'platform engineer', 'cloud engineer', 'infrastructure engineer',
-                           'automation engineer', 'product engineer']
+                           'automation engineer', 'product engineer',
+                           'chief technology officer', 'vp of engineering', 'head of engineering']
             if any(term in title_stripped for term in strong_titles):
                 return JobPriority.PERFECT_MATCH, "Perfect match: Strong IT/DevOps/SRE/Platform title"
 
@@ -3911,6 +3947,13 @@ async def run_daily_scrape_async(is_startup_run: bool = False):
             logger.info(f"Skipped {skipped_count} duplicate jobs ({skipped_urls} by URL, {skipped_titles} by title)")
         
         logger.info(f"New jobs to send: {len(new_jobs)}")
+
+        if new_jobs:
+            try:
+                day = datetime.now().strftime("%Y-%m-%d")
+                append_jobs_for_date(day, [j.to_dict() for j in new_jobs])
+            except Exception as e:
+                logger.warning("Could not persist job history: %s", e)
         
         # Save seen jobs IMMEDIATELY after deduplication (before sending to Discord)
         # This prevents race condition where multiple instances send same jobs
