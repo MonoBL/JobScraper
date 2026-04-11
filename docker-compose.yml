@@ -1,0 +1,51 @@
+# Single port for UI + API (no nginx). Point Cloudflare Tunnel at this port (default 8765).
+#
+#   cp .env.example .env
+#   docker compose build
+#   docker compose up -d
+#
+# Then tunnel to http://127.0.0.1:8765 (or host.docker.internal / LAN IP as appropriate).
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: app
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      JOB_SCRAPER_STATE_DIR: /var/lib/job-scraper
+    volumes:
+      - job_scraper_state:/var/lib/job-scraper
+    ports:
+      - "8765:8765"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/api/health')",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  scraper:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: app
+    restart: unless-stopped
+    command: ["python", "main.py"]
+    env_file: .env
+    environment:
+      JOB_SCRAPER_STATE_DIR: /var/lib/job-scraper
+    volumes:
+      - job_scraper_state:/var/lib/job-scraper
+    shm_size: "1gb"
+
+volumes:
+  job_scraper_state:

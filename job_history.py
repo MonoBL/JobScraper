@@ -13,17 +13,27 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 HISTORY_FILENAME = "jobs_by_date.json"
 MAX_DAYS_RETAINED = 400
 
 
+def get_data_dir() -> str:
+    """Job calendar JSON lives here. If JOB_SCRAPER_STATE_DIR is set, use <state>/data (Docker-friendly)."""
+    state = os.getenv("JOB_SCRAPER_STATE_DIR", "").strip()
+    if state:
+        p = os.path.join(state, "data")
+    else:
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+    os.makedirs(p, exist_ok=True)
+    return p
+
+
 def _history_path() -> str:
-    return os.path.join(DATA_DIR, HISTORY_FILENAME)
+    return os.path.join(get_data_dir(), HISTORY_FILENAME)
 
 
 def _ensure_data_dir() -> None:
-    os.makedirs(DATA_DIR, exist_ok=True)
+    get_data_dir()
 
 
 def load_all_history() -> Dict[str, List[Dict[str, Any]]]:
@@ -43,7 +53,7 @@ def load_all_history() -> Dict[str, List[Dict[str, Any]]]:
 
 def _atomic_write_json(path: str, payload: Dict[str, Any]) -> None:
     _ensure_data_dir()
-    fd, tmp = tempfile.mkstemp(prefix="jobs_hist_", suffix=".tmp", dir=DATA_DIR)
+    fd, tmp = tempfile.mkstemp(prefix="jobs_hist_", suffix=".tmp", dir=get_data_dir())
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)

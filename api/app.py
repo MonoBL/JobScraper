@@ -32,7 +32,10 @@ from job_agent import evaluate_job, is_agent_configured, list_agents
 
 app = FastAPI(title="Job Scraper Dashboard API", version="1.0.0")
 
-_origins = os.getenv("CORS_ORIGINS", "http://127.0.0.1:5173,http://localhost:5173").split(",")
+_origins = os.getenv(
+    "CORS_ORIGINS",
+    "http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:8765,http://localhost:8765",
+).split(",")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in _origins if o.strip()],
@@ -109,3 +112,11 @@ def agent_evaluate(body: AgentBody) -> Dict[str, Any]:
             detail="Agent request failed (unknown agent_id or LLM error).",
         )
     return {"agent_id": body.agent_id, "result": result}
+
+
+# Built dashboard (npm run build) — same origin as /api for Cloudflare Tunnel / homelab (single port).
+_dist = os.path.join(_ROOT, "web", "dist")
+if os.path.isdir(_dist):
+    from fastapi.staticfiles import StaticFiles
+
+    app.mount("/", StaticFiles(directory=_dist, html=True), name="static")

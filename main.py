@@ -51,6 +51,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _job_state_path(filename: str) -> str:
+    """Persist dedupe / weak-match files under JOB_SCRAPER_STATE_DIR when set (e.g. Docker volume)."""
+    base = os.getenv("JOB_SCRAPER_STATE_DIR", "").strip()
+    if base:
+        os.makedirs(base, exist_ok=True)
+        return os.path.join(base, filename)
+    return filename
+
+
 class JobPriority(Enum):
     """Job priority levels"""
     PERFECT_MATCH = 1
@@ -3560,7 +3569,7 @@ def load_seen_jobs() -> Tuple[Dict[str, str], Dict[str, str]]:
     Returns:
         tuple: (seen_urls_dict {normalized_url: date_str}, seen_titles_dict {normalized_title: date_str})
     """
-    seen_jobs_file = 'seen_jobs.json'
+    seen_jobs_file = _job_state_path("seen_jobs.json")
     seen_urls: Dict[str, str] = {}
     seen_titles: Dict[str, str] = {}
     today = datetime.now().strftime("%Y-%m-%d")
@@ -3597,7 +3606,7 @@ def load_seen_jobs() -> Tuple[Dict[str, str], Dict[str, str]]:
 
 def save_remaining_weak_matches(remaining_jobs: List[Job]):
     """Save remaining weak matches to file for 9:05 AM message"""
-    remaining_file = 'remaining_weak_matches.json'
+    remaining_file = _job_state_path("remaining_weak_matches.json")
     try:
         jobs_data = [job.to_dict() for job in remaining_jobs]
         with open(remaining_file, 'w') as f:
@@ -3609,7 +3618,7 @@ def save_remaining_weak_matches(remaining_jobs: List[Job]):
 
 def load_remaining_weak_matches() -> List[Job]:
     """Load remaining weak matches from file"""
-    remaining_file = 'remaining_weak_matches.json'
+    remaining_file = _job_state_path("remaining_weak_matches.json")
     jobs = []
     try:
         if os.path.exists(remaining_file):
@@ -3699,7 +3708,7 @@ def send_remaining_weak_matches():
                 logger.error(f"Error sending remaining weak matches message {chunk_idx + 1}: {e}")
         
         # Delete the file after sending
-        remaining_file = 'remaining_weak_matches.json'
+        remaining_file = _job_state_path("remaining_weak_matches.json")
         try:
             if os.path.exists(remaining_file):
                 os.remove(remaining_file)
@@ -3713,8 +3722,8 @@ def send_remaining_weak_matches():
 
 def save_seen_jobs(seen_urls: Dict[str, str], seen_titles: Dict[str, str]):
     """Save seen job URLs and titles to file (atomic operation to prevent race conditions)"""
-    seen_jobs_file = 'seen_jobs.json'
-    temp_file = 'seen_jobs.json.tmp'
+    seen_jobs_file = _job_state_path("seen_jobs.json")
+    temp_file = seen_jobs_file + ".tmp"
     max_retries = 3
 
     # Expire entries older than 30 days
