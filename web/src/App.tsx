@@ -180,10 +180,33 @@ export default function App() {
   const [jobsErr, setJobsErr] = useState<string | null>(null);
   const [health, setHealth] = useState<{
     ok?: boolean;
+    service?: string;
     agent?: boolean;
     agents_enabled?: boolean;
     agents?: AgentMeta[];
+    login_required?: boolean;
+    llm_agent_count?: number;
   }>({});
+  type PillState = "loading" | "ok" | "warn" | "error";
+  const [dashStatus, setDashStatus] = useState<{
+    api: PillState;
+    llm: PillState;
+    jobs: PillState;
+    schedule: PillState;
+    profile: PillState;
+    auth: PillState;
+  }>({
+    api: "loading",
+    llm: "loading",
+    jobs: "loading",
+    schedule: "loading",
+    profile: "loading",
+    auth: "loading",
+  });
+  const [statusCheckedAt, setStatusCheckedAt] = useState<Date | null>(null);
+  const [statusHints, setStatusHints] = useState<Record<string, string>>({});
+  const [discordNotificationsEnabled, setDiscordNotificationsEnabled] = useState<boolean | null>(null);
+  const [discordToggleSaving, setDiscordToggleSaving] = useState(false);
   const [agents, setAgents] = useState<AgentMeta[]>([]);
   const [agentBusy, setAgentBusy] = useState<string | null>(null);
   const [agentResults, setAgentResults] = useState<Record<string, Record<string, AgentResultEntry>>>(
@@ -209,6 +232,7 @@ export default function App() {
   const [resumeUploading, setResumeUploading] = useState(false);
   const [reviewBusy, setReviewBusy] = useState(false);
   const [profileMsg, setProfileMsg] = useState<string | null>(null);
+  const [resumeFileName, setResumeFileName] = useState<string | null>(null);
   const resumeFileRef = useRef<HTMLInputElement>(null);
 
   const countByDate = useMemo(() => {
@@ -227,24 +251,183 @@ export default function App() {
     setSummaries(data.dates ?? []);
   }, []);
 
-  const loadHealth = useCallback(async () => {
-    try {
-      const r = await fetch("/api/health");
-      if (r.ok) setHealth(await r.json());
-    } catch {
-      /* ignore */
-    }
-  }, []);
+  const refreshDashboardStatus = useCallback(async () => {
+    const hint = (key: string, msg: string) =>
+      setStatusHints((prev) => ({ ...prev, [key]: msg }));
 
-  const loadAgents = useCallback(async () => {
+    setDashStatus({
+      api: "loading",
+      llm: "loading",
+      jobs: "loading",
+      schedule: "loading",
+      profile: "loading",
+      auth: "loading",
+    });
+
+    let healthJson: {
+      ok?: boolean;
+      agent?: boolean;
+      agents?: AgentMeta[];
+      login_required?: boolean;
+    } | null = null;
+
     try {
-      const r = await apiFetch("/api/agents");
-      if (r.ok) {
-        const data = await r.json();
+      const hRes = await apiFetch("/api/health");
+      if (!hRes.ok) {
+        hint("api", `${hRes.status} ${hRes.statusText}`);
+        setHealth({});
+        setAgents([]);
+        setDashStatus({
+          api: "error",
+          llm: "error",
+          jobs: "error",
+          schedule: "error",
+          profile: "error",
+          auth: "error",
+        });
+        setDiscordNotificationsEnabled(null);
+        setStatusCheckedAt(new Date());
+        return;
+      }
+      const parsed = await hRes.json();
+      healthJson = parsed;
+      setHealth(
+        parsed as {
+          ok?: boolean;
+          service?: string;
+          agent?: boolean;
+          agents_enabled?: boolean;
+          agents?: AgentMeta[];
+          login_required?: boolean;
+          llm_agent_count?: number;
+        }
+      );
+      hint("api", "Backend reachable");
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "Network error";
+      hint("api", msg);
+      setHealth({});
+      setAgents([]);
+      setDashStatus({
+        api: "error",
+        llm: "error",
+        jobs: "error",
+        schedule: "error",
+        profile: "error",
+        auth: "error",
+      });
+      setDiscordNotificationsEnabled(null);
+      setStatusCheckedAt(new Date());
+      return;
+    }
+
+    const llmOk = healthJson?.agent === true;
+    hint("llm", llmOk ? "API key set — agents enabled" : "No OPENROUTER_API_KEY / OPENAI_API_KEY");
+
+    const [agentsR, datesR, schedR, profR, sessR, notifR] = await Promise.all([
+      apiFetch("/api/agents"),
+      apiFetch("/api/dates"),
+      apiFetch("/api/schedule"),
+      apiFetch("/api/profile"),
+      requireLogin ? apiFetch("/api/auth/session") : Promise.resolve(null as Response | null),
+      apiFetch("/api/settings/notifications"),
+    ]);
+
+    if (agentsR.ok) {
+      try {
+        const data = await agentsR.json();
         setAgents(data.agents ?? []);
+      } catch {
+        setAgents(healthJson?.agents ?? []);
+      }
+    } else {
+      setAgents(healthJson?.agents ?? []);
+      hint(
+        "llm",
+        llmOk
+          ? `LLM OK · /api/agents ${agentsR.status} (using agent list from /api/health)`
+          : "No LLM API key on server"
+      );
+    }
+
+    let jobsP: PillState = datesR.ok ? "ok" : "error";
+    if (!datesR.ok) {
+      hint("jobs", datesR.status === 401 ? "Sign in again" : `${datesR.status} ${datesR.statusText}`);
+    } else {
+      hint("jobs", "Calendar / job history API OK");
+    }
+
+    let schedP: PillState = schedR.ok ? "ok" : "error";
+    if (!schedR.ok) {
+      hint("schedule", `${schedR.status} ${schedR.statusText}`);
+    } else {
+      hint("schedule", "Next-run schedule available");
+    }
+
+    let profP: PillState = profR.ok ? "ok" : "error";
+    if (!profR.ok) {
+      hint("profile", `${profR.status} ${profR.statusText}`);
+    } else {
+      hint("profile", "Resume / ranker profile API OK");
+    }
+
+    let authP: PillState = "ok";
+    if (requireLogin) {
+      if (!sessR || !sessR.ok) {
+        authP = "error";
+        hint("auth", sessR ? `${sessR.status} session` : "No session response");
+      } else {
+        try {
+          const sj = (await sessR.json()) as { valid?: boolean };
+          authP = sj.valid ? "ok" : "error";
+          hint("auth", sj.valid ? "JWT session valid" : "Session expired — sign in again");
+        } catch {
+          authP = "error";
+          hint("auth", "Invalid session response");
+        }
+      }
+    } else {
+      hint("auth", "Dashboard login disabled (dev)");
+    }
+
+    if (notifR.ok) {
+      try {
+        const nj = (await notifR.json()) as { discord_notifications_enabled?: boolean };
+        setDiscordNotificationsEnabled(nj.discord_notifications_enabled !== false);
+      } catch {
+        setDiscordNotificationsEnabled(true);
+      }
+    } else {
+      setDiscordNotificationsEnabled(null);
+    }
+
+    setDashStatus({
+      api: "ok",
+      llm: llmOk ? "ok" : "warn",
+      jobs: jobsP,
+      schedule: schedP,
+      profile: profP,
+      auth: authP,
+    });
+    setStatusCheckedAt(new Date());
+  }, [requireLogin]);
+
+  const saveDiscordNotifications = useCallback(async (enabled: boolean) => {
+    setDiscordToggleSaving(true);
+    try {
+      const r = await apiFetch("/api/settings/notifications", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ discord_notifications_enabled: enabled }),
+      });
+      if (r.ok) {
+        const d = (await r.json()) as { discord_notifications_enabled?: boolean };
+        setDiscordNotificationsEnabled(d.discord_notifications_enabled !== false);
       }
     } catch {
-      setAgents([]);
+      /* keep previous toggle */
+    } finally {
+      setDiscordToggleSaving(false);
     }
   }, []);
 
@@ -322,12 +505,17 @@ export default function App() {
 
   useEffect(() => {
     if (authPhase !== "ready") return;
-    loadHealth();
-    loadAgents();
+    void refreshDashboardStatus();
     loadSummaries().catch(() => setSummaries([]));
     void loadSchedule();
     void loadProfile();
-  }, [authPhase, loadSummaries, loadHealth, loadAgents, loadSchedule, loadProfile]);
+  }, [authPhase, loadSummaries, refreshDashboardStatus, loadSchedule, loadProfile]);
+
+  useEffect(() => {
+    if (authPhase !== "ready") return;
+    const id = window.setInterval(() => void refreshDashboardStatus(), 90_000);
+    return () => window.clearInterval(id);
+  }, [authPhase, refreshDashboardStatus]);
 
   useEffect(() => {
     if (authPhase !== "ready") return;
@@ -431,6 +619,7 @@ export default function App() {
       }
       setProfileMsg(`Resume saved (${data.char_count ?? "?"} characters extracted). Run “Update ranker from resume”.`);
       if (input) input.value = "";
+      setResumeFileName(null);
       await loadProfile();
     } catch (e: unknown) {
       setProfileMsg(e instanceof Error ? e.message : "Upload failed");
@@ -591,7 +780,8 @@ export default function App() {
     }
     return base;
   }, [scrapePhaseIdx, displayAgents]);
-  const agentsReady = health.agent === true || health.agents_enabled === true;
+  /** Only disable LLM actions when health explicitly reports no API key — not while loading or on fetch failure. */
+  const llmDisabled = health.agent === false;
 
   const todayIso = isoDate(new Date());
 
@@ -639,6 +829,68 @@ export default function App() {
             </button>
           </div>
         </div>
+        <div
+          className="dashboard-status"
+          role="region"
+          aria-label="Service status"
+          aria-live="polite"
+        >
+          <div className="dashboard-status-inner">
+            <span className="dashboard-status-title">System status</span>
+            {(
+              [
+                ["api", "API"],
+                ["llm", "LLM"],
+                ["jobs", "Jobs"],
+                ["schedule", "Schedule"],
+                ["profile", "Profile"],
+                ["auth", "Login"],
+              ] as const
+            ).map(([key, label]) => (
+              <span
+                key={key}
+                className={`status-pill status-pill--${dashStatus[key]}`}
+                title={statusHints[key] ?? label}
+              >
+                <span className="status-pill-dot" aria-hidden />
+                {label}
+              </span>
+            ))}
+            <button
+              type="button"
+              className="status-refresh-btn"
+              onClick={() => void refreshDashboardStatus()}
+            >
+              Refresh status
+            </button>
+            <button
+              type="button"
+              className="status-hard-refresh-btn"
+              title="Reload the entire dashboard (full page reload)"
+              onClick={() => window.location.reload()}
+            >
+              Hard refresh
+            </button>
+            <label
+              className="discord-toggle"
+              title="When off, scrapes still run but no messages are sent to Discord (saved in data/app_settings.json on the server)."
+            >
+              <input
+                type="checkbox"
+                role="switch"
+                checked={discordNotificationsEnabled === true}
+                disabled={discordNotificationsEnabled === null || discordToggleSaving}
+                onChange={(e) => void saveDiscordNotifications(e.target.checked)}
+              />
+              <span className="discord-toggle-text">Discord messages</span>
+            </label>
+            {statusCheckedAt ? (
+              <time className="status-checked-at" dateTime={statusCheckedAt.toISOString()}>
+                Checked {statusCheckedAt.toLocaleTimeString()}
+              </time>
+            ) : null}
+          </div>
+        </div>
         {scrapePolling && (
           <div className="scrape-progress" aria-busy="true">
             <div className="scrape-progress-bar indeterminate" />
@@ -658,31 +910,51 @@ export default function App() {
           <code className="schedule-env">main.py</code> and saves <strong>additional</strong> title and
           keyword phrases to{" "}
           <code className="schedule-env">data/ranker_overrides.json</code>. The next scrape uses those
-          extras so matches align better with your background.
+          extras so matches align better with your background. After upload, run{" "}
+          <strong>Update ranker from resume</strong> — until then, “Extra phrases” stays none.
         </p>
         <div className="profile-row">
-          <input
-            ref={resumeFileRef}
-            type="file"
-            accept="application/pdf,.pdf"
-            className="profile-file"
-          />
-          <button type="button" disabled={resumeUploading} onClick={() => void uploadResumeFile()}>
+          <div className="profile-file-picker">
+            <input
+              ref={resumeFileRef}
+              id="resume-pdf-input"
+              type="file"
+              accept="application/pdf,.pdf"
+              className="profile-file-input"
+              onChange={(e) => setResumeFileName(e.target.files?.[0]?.name ?? null)}
+            />
+            <label htmlFor="resume-pdf-input" className="profile-file-label">
+              Choose PDF
+            </label>
+            <span className="profile-file-name" title={resumeFileName ?? undefined}>
+              {resumeFileName ?? "No file chosen"}
+            </span>
+          </div>
+          <button
+            type="button"
+            className="profile-btn-secondary"
+            disabled={resumeUploading}
+            onClick={() => void uploadResumeFile()}
+          >
             {resumeUploading ? "Uploading…" : "Upload PDF"}
           </button>
           <button
             type="button"
             className="profile-review-btn"
-            disabled={reviewBusy || !profile?.has_resume || health.agent === false}
+            disabled={reviewBusy || !profile?.has_resume || llmDisabled}
             onClick={() => void reviewResumeProfile()}
           >
             {reviewBusy ? "Updating ranker…" : "Update ranker from resume"}
           </button>
-          <button type="button" className="sign-out-btn" onClick={() => void clearRankerOverrides()}>
+          <button
+            type="button"
+            className="profile-btn-secondary"
+            onClick={() => void clearRankerOverrides()}
+          >
             Clear overrides
           </button>
         </div>
-        {health.agent === false && (
+        {llmDisabled && (
           <p className="profile-hint">Set OPENROUTER_API_KEY or OPENAI_API_KEY to run resume review.</p>
         )}
         {profile && (
@@ -764,7 +1036,7 @@ export default function App() {
             {health.agent === false && (
               <span> · Agents: set OPENROUTER_API_KEY or OPENAI_API_KEY</span>
             )}
-            {agentsReady && (
+            {!llmDisabled && (health.agent === true || health.agents_enabled === true) && (
               <span>
                 {" "}
                 · {displayAgents.length} agent{displayAgents.length === 1 ? "" : "s"} configured
@@ -841,16 +1113,20 @@ export default function App() {
                 <div className="agent-row">
                   {displayAgents.map((a) => {
                     const busyKey = `${key}::${a.id}`;
+                    const thisJobAgentLoading =
+                      agentBusy !== null && agentBusy.startsWith(`${key}::`);
                     return (
                       <button
                         key={a.id}
                         type="button"
                         className="agent-btn"
-                        disabled={!agentsReady || agentBusy === busyKey}
+                        disabled={llmDisabled || thisJobAgentLoading}
                         title={
-                          a.model
-                            ? `${a.description || a.label} — ${a.model}`
-                            : a.description || a.label
+                          llmDisabled
+                            ? "Set OPENROUTER_API_KEY or OPENAI_API_KEY on the API server"
+                            : a.model
+                              ? `${a.description || a.label} — ${a.model}`
+                              : a.description || a.label
                         }
                         onClick={() => runAgent(job, a.id)}
                       >

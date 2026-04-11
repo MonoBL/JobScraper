@@ -3665,6 +3665,12 @@ def load_remaining_weak_matches() -> List[Job]:
 
 def send_remaining_weak_matches():
     """Send remaining weak matches at 9:05 AM"""
+    from app_settings import is_discord_notifications_enabled
+
+    if not is_discord_notifications_enabled():
+        logger.info("Discord notifications disabled (app settings); skipping 9:05 AM Discord send.")
+        return
+
     webhook_url = os.getenv('DISCORD_WEBHOOK_URL')
     if not webhook_url:
         logger.warning("DISCORD_WEBHOOK_URL not set. Cannot send remaining weak matches.")
@@ -4009,22 +4015,32 @@ async def run_daily_scrape_async(is_startup_run: bool = False):
                 logger.warning(".env file exists: " + str(os.path.exists('.env')))
             
             if webhook_url:
-                try:
-                    logger.info(f"Attempting to send {len(new_jobs)} jobs to Discord...")
-                    notifier = DiscordNotifier(webhook_url)
-                    # On startup, include all weak matches in the main message
-                    # On scheduled runs, split weak matches to 9:05 AM
-                    notifier.send_summary(new_jobs, include_all_weak_matches=is_startup_run)
-                    logger.info("Successfully sent jobs to Discord!")
-                except Exception as e:
-                    logger.error(f"Error sending to Discord: {e}", exc_info=True)
-                    # Fallback to console output
-                    logger.info("Falling back to console output...")
+                from app_settings import is_discord_notifications_enabled
+
+                if not is_discord_notifications_enabled():
+                    logger.info("Discord notifications disabled (app settings); skipping Discord send.")
                     for job in sorted(new_jobs, key=lambda x: x.priority.value):
                         print(f"\n[{job.priority.name}] {job.title} @ {job.company}")
                         print(f"  Reason: {job.priority_reason}")
                         print(f"  URL: {job.url}")
                         print(f"  Source: {job.source}")
+                else:
+                    try:
+                        logger.info(f"Attempting to send {len(new_jobs)} jobs to Discord...")
+                        notifier = DiscordNotifier(webhook_url)
+                        # On startup, include all weak matches in the main message
+                        # On scheduled runs, split weak matches to 9:05 AM
+                        notifier.send_summary(new_jobs, include_all_weak_matches=is_startup_run)
+                        logger.info("Successfully sent jobs to Discord!")
+                    except Exception as e:
+                        logger.error(f"Error sending to Discord: {e}", exc_info=True)
+                        # Fallback to console output
+                        logger.info("Falling back to console output...")
+                        for job in sorted(new_jobs, key=lambda x: x.priority.value):
+                            print(f"\n[{job.priority.name}] {job.title} @ {job.company}")
+                            print(f"  Reason: {job.priority_reason}")
+                            print(f"  URL: {job.url}")
+                            print(f"  Source: {job.source}")
             else:
                 logger.warning("DISCORD_WEBHOOK_URL not set. Skipping Discord notification.")
                 # Print summary to console
@@ -4056,6 +4072,12 @@ def run_daily_scrape(is_startup_run: bool = False):
 
 def send_startup_notification():
     """Send startup confirmation to Discord"""
+    from app_settings import is_discord_notifications_enabled
+
+    if not is_discord_notifications_enabled():
+        logger.info("Discord notifications disabled (app settings); skipping startup Discord message.")
+        return
+
     webhook_url = os.getenv('DISCORD_WEBHOOK_URL')
     if not webhook_url:
         logger.warning("DISCORD_WEBHOOK_URL not set. Cannot send startup notification.")

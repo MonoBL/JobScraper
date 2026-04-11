@@ -120,12 +120,16 @@ protected = APIRouter(prefix="/api", dependencies=[Depends(require_dashboard)])
 
 @public.get("/api/health")
 def health() -> Dict[str, Any]:
-    agents = list_agents() if is_agent_configured() else []
+    llm = is_agent_configured()
+    agents = list_agents() if llm else []
     return {
         "ok": True,
-        "agent": is_agent_configured(),
-        "agents_enabled": is_agent_configured(),
+        "service": "job-scraper-dashboard",
+        "agent": llm,
+        "agents_enabled": llm,
         "agents": agents,
+        "login_required": _login_required(),
+        "llm_agent_count": len(agents),
     }
 
 
@@ -275,6 +279,24 @@ def profile_clear_overrides() -> Dict[str, Any]:
 
     clear_overrides_file()
     return {"ok": True}
+
+
+class NotificationSettingsBody(BaseModel):
+    discord_notifications_enabled: bool = Field(..., description="When False, main.py skips all Discord webhook sends.")
+
+
+@protected.get("/settings/notifications")
+def get_notification_settings() -> Dict[str, Any]:
+    from app_settings import load_settings
+
+    return load_settings()
+
+
+@protected.put("/settings/notifications")
+def put_notification_settings(body: NotificationSettingsBody) -> Dict[str, Any]:
+    from app_settings import set_discord_notifications_enabled
+
+    return set_discord_notifications_enabled(body.discord_notifications_enabled)
 
 
 def _parse_schedule_time() -> tuple[int, int]:
