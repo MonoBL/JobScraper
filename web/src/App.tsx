@@ -42,6 +42,7 @@ type JobRow = {
   priority_reason: string;
   posted_date?: string | null;
   category?: string;
+  agent_results?: Record<string, Record<string, unknown>>;
 };
 
 type DateSummary = {
@@ -282,6 +283,7 @@ export default function App({ initialView = "dashboard" }: AppProps) {
     {}
   );
   const [expandedDesc, setExpandedDesc] = useState<Record<string, boolean>>({});
+  const [feedback, setFeedback] = useState<Record<string, "good" | "bad">>({});
   const [scrapeBusy, setScrapeBusy] = useState(false);
   const [scrapeMsg, setScrapeMsg] = useState<string | null>(null);
   const [scrapePolling, setScrapePolling] = useState(false);
@@ -400,7 +402,7 @@ export default function App({ initialView = "dashboard" }: AppProps) {
     const llmOk = healthJson?.agent === true;
     hint("llm", llmOk ? "API key set — agents enabled" : "No OPENROUTER_API_KEY / OPENAI_API_KEY");
 
-    const [agentsR, datesR, schedR, profR, sessR, notifR, diagR, sourcesR] = await Promise.all([
+    const [agentsR, datesR, schedR, profR, sessR, notifR, diagR, sourcesR, feedbackR] = await Promise.all([
       apiFetch("/api/agents"),
       apiFetch("/api/dates"),
       apiFetch("/api/schedule"),
@@ -409,6 +411,7 @@ export default function App({ initialView = "dashboard" }: AppProps) {
       apiFetch("/api/settings/notifications"),
       apiFetch("/api/agents/diagnostics"),
       apiFetch("/api/sources"),
+      apiFetch("/api/feedback"),
     ]);
 
     if (agentsR.ok) {
@@ -500,6 +503,15 @@ export default function App({ initialView = "dashboard" }: AppProps) {
       }
     } else {
       setScrapeSources(null);
+    }
+
+    if (feedbackR.ok) {
+      try {
+        const fj = (await feedbackR.json()) as { feedback?: Record<string, string> };
+        setFeedback((fj.feedback ?? {}) as Record<string, "good" | "bad">);
+      } catch {
+        // non-fatal
+      }
     }
 
     setDashStatus({
@@ -752,6 +764,22 @@ export default function App({ initialView = "dashboard" }: AppProps) {
               a.title.localeCompare(b.title)
           );
           setJobs(list);
+          // Pre-populate agentResults from stored agent_results in each job
+          setAgentResults((prev) => {
+            const next = { ...prev };
+            for (const job of list) {
+              if (job.agent_results) {
+                const jobKey = job.url || job.title;
+                next[jobKey] = { ...(next[jobKey] || {}) };
+                for (const [agId, result] of Object.entries(job.agent_results)) {
+                  if (!next[jobKey][agId]) {
+                    next[jobKey][agId] = { data: result as Record<string, unknown> };
+                  }
+                }
+              }
+            }
+            return next;
+          });
         }
       })
       .catch((e: Error) => {
@@ -938,6 +966,20 @@ export default function App({ initialView = "dashboard" }: AppProps) {
     }
   }
 
+  async function saveFeedback(job: JobRow, value: "good" | "bad") {
+    const url = job.url;
+    setFeedback((prev) => ({ ...prev, [url]: value }));
+    try {
+      await apiFetch("/api/feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, title: job.title, company: job.company, feedback: value }),
+      });
+    } catch {
+      // non-fatal
+    }
+  }
+
   const displayAgents = agents.length > 0 ? agents : FALLBACK_AGENTS;
   const scrapePhaseText = useMemo(() => {
     const phase = scrapeStatus.phase;
@@ -946,6 +988,7 @@ export default function App({ initialView = "dashboard" }: AppProps) {
     if (phase === "scrapers" && total > 0) return `Running scrapers… (${done}/${total} done)`;
     if (phase === "ranking") return "Ranking & deduplicating jobs…";
     if (phase === "saving") return "Saving history…";
+    if (phase === "ai_eval") return "AI scoring top jobs…";
     if (phase === "discord") return "Sending Discord notification…";
     if (phase === "done") return "Done.";
     if (phase === "error") return `Error: ${scrapeStatus.error ?? "unknown"}`;
@@ -967,7 +1010,8 @@ export default function App({ initialView = "dashboard" }: AppProps) {
       return Math.round(10 + (done / total) * 70);
     }
     if (phase === "ranking") return 82;
-    if (phase === "saving") return 90;
+    if (phase === "saving") return 88;
+    if (phase === "ai_eval") return 92;
     if (phase === "discord") return 96;
     return 100;
   }, [scrapeStatus]);
@@ -1277,6 +1321,20 @@ export default function App({ initialView = "dashboard" }: AppProps) {
                   >
                     {descOpen ? "Hide description" : "Description"}
                   </button>
+                  <div className="feedback-btns">
+                    <button
+                      type="button"
+                      className={`fb-btn${feedback[job.url] === "good" ? " fb-good active" : " fb-good"}`}
+                      title="Good match"
+                      onClick={() => saveFeedback(job, feedback[job.url] === "good" ? "bad" : "good")}
+                    >👍</button>
+                    <button
+                      type="button"
+                      className={`fb-btn${feedback[job.url] === "bad" ? " fb-bad active" : " fb-bad"}`}
+                      title="Not interested"
+                      onClick={() => saveFeedback(job, feedback[job.url] === "bad" ? "good" : "bad")}
+                    >👎</button>
+                  </div>
                 </div>
                 <div className="agent-row">
                     <span className="agent-row-label">AI analysis</span>

@@ -35,6 +35,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, File, Header, 
 from fastapi.middleware.cors import CORSMiddleware
 
 from job_history import get_jobs_for_date, list_date_summaries, today_iso
+from feedback_store import upsert_feedback, load_all_feedback, list_feedback
 from job_agent import (
     evaluate_job,
     get_llm_diagnostics,
@@ -314,6 +315,24 @@ def profile_clear_overrides() -> Dict[str, Any]:
 
     clear_overrides_file()
     return {"ok": True}
+
+
+class FeedbackBody(BaseModel):
+    url: str = Field(..., min_length=1)
+    title: str = ""
+    company: str = ""
+    feedback: str = Field(..., pattern="^(good|bad)$")
+
+
+@protected.post("/feedback")
+def post_feedback(body: FeedbackBody) -> Dict[str, Any]:
+    entry = upsert_feedback(body.url, body.title, body.company, body.feedback)
+    return {"ok": True, "entry": entry}
+
+
+@protected.get("/feedback")
+def get_all_feedback() -> Dict[str, Any]:
+    return {"feedback": load_all_feedback()}
 
 
 class NotificationSettingsBody(BaseModel):

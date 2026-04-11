@@ -4083,15 +4083,44 @@ async def run_daily_scrape_async(is_startup_run: bool = False, progress: Optiona
             }
 
         _prog("saving")
+        day = datetime.now().strftime("%Y-%m-%d")
         if new_jobs:
             try:
-                day = datetime.now().strftime("%Y-%m-%d")
                 append_jobs_for_date(day, [j.to_dict() for j in new_jobs])
                 logger.info(f"Saved {len(new_jobs)} jobs to history for {day}")
             except Exception as e:
                 logger.error("Could not persist job history: %s", e)
                 if progress is not None:
                     progress["error"] = f"History write failed: {e}"
+
+        # Auto-evaluate top jobs with fit agent (runs after history is saved)
+        _prog("ai_eval")
+        try:
+            from job_agent import auto_evaluate_jobs, is_agent_configured
+            from job_history import load_all_history, _atomic_write_json, _history_path
+            if is_agent_configured() and new_jobs:
+                top_jobs = [j for j in new_jobs if j.priority == JobPriority.PERFECT_MATCH][:15]
+                top_jobs += [j for j in new_jobs if j.priority == JobPriority.GOOD_MATCH][:5]
+                if top_jobs:
+                    logger.info(f"Auto-evaluating {len(top_jobs)} top jobs with fit agent…")
+                    fit_results = await asyncio.get_event_loop().run_in_executor(
+                        None, auto_evaluate_jobs, top_jobs, "fit", len(top_jobs)
+                    )
+                    if fit_results:
+                        store = load_all_history()
+                        history_jobs = store.get(day, [])
+                        url_idx = {j.get("url", ""): i for i, j in enumerate(history_jobs)}
+                        for url, result in fit_results.items():
+                            idx = url_idx.get(url)
+                            if idx is not None:
+                                if "agent_results" not in history_jobs[idx]:
+                                    history_jobs[idx]["agent_results"] = {}
+                                history_jobs[idx]["agent_results"]["fit"] = result
+                        store[day] = history_jobs
+                        _atomic_write_json(_history_path(), store)
+                        logger.info(f"Stored fit scores for {len(fit_results)} jobs")
+        except Exception as e:
+            logger.warning("Auto-eval failed (non-fatal): %s", e)
 
         # Save seen jobs IMMEDIATELY after deduplication (before sending to Discord)
         # This prevents race condition where multiple instances send same jobs

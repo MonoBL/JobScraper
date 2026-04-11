@@ -382,6 +382,47 @@ def evaluate_job(
         return None
 
 
+def auto_evaluate_jobs(
+    jobs: List[Any],
+    agent_id: str = "fit",
+    max_jobs: int = 15,
+) -> Dict[str, Any]:
+    """
+    Run agent_id on up to max_jobs jobs (sync, uses thread pool internally).
+    jobs: list of objects with .title, .company, .description, .url attributes OR dicts.
+    Returns {url: result_dict} for successful evals.
+    """
+    import concurrent.futures
+
+    if not is_agent_configured():
+        return {}
+
+    def _get(j: Any, field: str, default: str = "") -> str:
+        if isinstance(j, dict):
+            return j.get(field) or default
+        return getattr(j, field, None) or default
+
+    subset = list(jobs)[:max_jobs]
+
+    def _eval_one(j: Any) -> tuple[str, Optional[Dict[str, Any]]]:
+        url = _get(j, "url")
+        result = evaluate_job(
+            _get(j, "title"),
+            _get(j, "company"),
+            _get(j, "description"),
+            agent_id=agent_id,
+        )
+        return url, result
+
+    results: Dict[str, Any] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
+        for url, result in ex.map(_eval_one, subset):
+            if result and url:
+                results[url] = result
+
+    return results
+
+
 def _resume_profile_model() -> str:
     o = os.getenv("AGENT_RESUME_PROFILE_MODEL", "").strip()
     if o:

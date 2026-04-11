@@ -1119,6 +1119,35 @@ body {
   text-decoration: underline;
 }
 
+.feedback-btns {
+  display: flex;
+  gap: 0.2rem;
+  margin-left: auto;
+}
+
+.fb-btn {
+  font-family: inherit;
+  font-size: 1rem;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.2rem 0.45rem;
+  cursor: pointer;
+  opacity: 0.45;
+  transition: opacity 0.15s, border-color 0.15s;
+  line-height: 1;
+}
+
+.fb-btn:hover {
+  opacity: 1;
+}
+
+.fb-btn.active {
+  opacity: 1;
+  border-color: var(--accent);
+  background: rgba(91, 141, 239, 0.1);
+}
+
 .job-actions button {
   font-family: inherit;
   font-size: 0.82rem;
