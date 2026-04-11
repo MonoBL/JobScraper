@@ -1142,32 +1142,59 @@ body {
 .agent-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.4rem;
-  align-items: center;
-  margin-top: 0.15rem;
+  gap: 0.5rem;
+  align-items: flex-start;
+  margin-top: 0.25rem;
+}
+
+.agent-row-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  font-weight: 600;
+  align-self: center;
+  margin-right: 0.15rem;
 }
 
 .agent-row .agent-btn {
   font-family: inherit;
-  font-size: 0.8rem;
-  font-weight: 600;
-  padding: 0.38rem 0.7rem;
-  border-radius: 8px;
-  border: 1px solid rgba(91, 141, 239, 0.45);
-  background: rgba(91, 141, 239, 0.12);
-  color: var(--accent);
   cursor: pointer;
+  border-radius: 10px;
+  border: 1px solid rgba(91, 141, 239, 0.4);
+  background: rgba(91, 141, 239, 0.08);
+  color: var(--accent);
+  padding: 0.45rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.1rem;
+  min-width: 7.5rem;
+  text-align: left;
   transition: background 0.15s, border-color 0.15s;
 }
 
 .agent-row .agent-btn:hover:not(:disabled) {
-  background: rgba(91, 141, 239, 0.22);
+  background: rgba(91, 141, 239, 0.18);
   border-color: var(--accent);
 }
 
 .agent-row .agent-btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+.agent-btn-label {
+  font-size: 0.82rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.agent-btn-desc {
+  font-size: 0.72rem;
+  font-weight: 400;
+  color: var(--muted);
+  line-height: 1.3;
 }
 
 .agent-subcard {
