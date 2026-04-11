@@ -287,6 +287,7 @@ export default function App({ initialView = "dashboard" }: AppProps) {
   const [scrapePolling, setScrapePolling] = useState(false);
   const [scrapePhaseIdx, setScrapePhaseIdx] = useState(0);
   const [scrapeDebugOpen, setScrapeDebugOpen] = useState(false);
+  const [categoryFilter, setCategoryFilter] = useState<"all" | "crypto" | "cruise" | "general">("all");
   const [scrapeStatus, setScrapeStatus] = useState<ScrapeStatus>({});
   const [nextRunAtMs, setNextRunAtMs] = useState<number | null>(null);
   const [scheduleTimeLabel, setScheduleTimeLabel] = useState("09:00");
@@ -975,6 +976,11 @@ export default function App({ initialView = "dashboard" }: AppProps) {
 
   const todayIso = serverToday ?? isoDate(new Date());
 
+  const filteredJobs = useMemo(
+    () => categoryFilter === "all" ? jobs : jobs.filter((j) => (j.category || "crypto") === categoryFilter),
+    [jobs, categoryFilter]
+  );
+
   if (authPhase === "loading") {
     return (
       <div className="login-screen">
@@ -1200,8 +1206,21 @@ export default function App({ initialView = "dashboard" }: AppProps) {
               year: "numeric",
             })}</h2>
             <span className="sub">
-              {loading ? "Loading…" : `${jobs.length} job${jobs.length === 1 ? "" : "s"}`}
+              {loading ? "Loading…" : `${filteredJobs.length}${categoryFilter !== "all" ? `/${jobs.length}` : ""} job${filteredJobs.length === 1 ? "" : "s"}`}
             </span>
+          </div>
+
+          <div className="cat-filters">
+            {(["all", "crypto", "cruise", "general"] as const).map((cat) => (
+              <button
+                key={cat}
+                type="button"
+                className={`cat-filter-btn${categoryFilter === cat ? " active" : ""}`}
+                onClick={() => setCategoryFilter(cat)}
+              >
+                {cat === "all" ? "All" : cat.charAt(0).toUpperCase() + cat.slice(1)}
+              </button>
+            ))}
           </div>
 
           {jobsErr && <p className="err">{jobsErr}</p>}
@@ -1212,8 +1231,11 @@ export default function App({ initialView = "dashboard" }: AppProps) {
               scheduled run). Days before this change have no archive.
             </p>
           )}
+          {!loading && !jobsErr && jobs.length > 0 && filteredJobs.length === 0 && (
+            <p className="empty">No {categoryFilter} jobs for this day.</p>
+          )}
 
-          {jobs.map((job) => {
+          {filteredJobs.map((job) => {
             const key = job.url || job.title;
             const pri =
               job.priority === "PERFECT_MATCH"

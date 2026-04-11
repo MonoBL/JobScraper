@@ -972,6 +972,36 @@ body {
   opacity: 0.95;
 }
 
+.cat-filters {
+  display: flex;
+  gap: 0.4rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+
+.cat-filter-btn {
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 0.2rem 0.7rem;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+.cat-filter-btn:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.cat-filter-btn.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
 .jobs-head {
   display: flex;
   flex-wrap: wrap;
