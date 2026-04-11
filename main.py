@@ -379,39 +379,58 @@ class PlaywrightBrowserManager:
 
     _browser: Optional[Browser] = None
     _playwright = None
+    _lock: Optional[asyncio.Lock] = None        # prevents concurrent browser launches
+    _page_sem: Optional[asyncio.Semaphore] = None  # limits concurrent open pages
+
+    # Max concurrent pages across all scrapers (prevents SIGSEGV from memory overload)
+    _MAX_CONCURRENT_PAGES = 5
+
+    @classmethod
+    def _get_lock(cls) -> asyncio.Lock:
+        if cls._lock is None:
+            cls._lock = asyncio.Lock()
+        return cls._lock
+
+    @classmethod
+    def _get_page_sem(cls) -> asyncio.Semaphore:
+        if cls._page_sem is None:
+            cls._page_sem = asyncio.Semaphore(cls._MAX_CONCURRENT_PAGES)
+        return cls._page_sem
 
     @classmethod
     async def get_browser(cls) -> Browser:
-        """Get or create browser instance"""
-        if cls._browser is None:
-            cls._playwright = await async_playwright().start()
-            cls._browser = await cls._playwright.chromium.launch(
-                headless=True,
-                args=[
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-accelerated-2d-canvas',
-                    '--disable-gpu',
-                    '--disable-blink-features=AutomationControlled',
-                    '--disable-features=IsolateOrigins,site-per-process',
-                ]
-            )
+        """Get or create browser instance (thread-safe via asyncio.Lock)."""
+        async with cls._get_lock():
+            if cls._browser is None:
+                cls._playwright = await async_playwright().start()
+                cls._browser = await cls._playwright.chromium.launch(
+                    headless=True,
+                    args=[
+                        '--no-sandbox',
+                        '--disable-setuid-sandbox',
+                        '--disable-dev-shm-usage',
+                        '--disable-accelerated-2d-canvas',
+                        '--disable-gpu',
+                        '--disable-blink-features=AutomationControlled',
+                        '--disable-features=IsolateOrigins,site-per-process',
+                    ]
+                )
         return cls._browser
 
     @classmethod
     async def close_browser(cls):
-        """Close browser instance"""
+        """Close browser instance and reset state."""
         if cls._browser:
             await cls._browser.close()
             cls._browser = None
         if cls._playwright:
             await cls._playwright.stop()
             cls._playwright = None
+        cls._lock = None  # reset so next run gets a fresh lock in the new event loop
 
     @classmethod
     async def create_page(cls) -> Page:
-        """Create a new page with stealth settings and a random User-Agent"""
+        """Create a new page with stealth settings and a random User-Agent."""
         browser = await cls.get_browser()
         ua = random.choice(_USER_AGENTS)
         page = await browser.new_page(user_agent=ua)
@@ -3504,15 +3523,33 @@ class DiscordNotifier:
         logger.info(f"Discord report sent — {len(jobs)} jobs total")
 
 
-async def _scrape_single(scraper: JobScraper) -> List[Job]:
+_scraper_semaphore: Optional[asyncio.Semaphore] = None
+
+def _get_scraper_semaphore() -> asyncio.Semaphore:
+    global _scraper_semaphore
+    if _scraper_semaphore is None:
+        _scraper_semaphore = asyncio.Semaphore(5)  # max 5 scrapers run concurrently
+    return _scraper_semaphore
+
+
+async def _scrape_single(scraper: JobScraper, progress_entry: Optional[Dict] = None) -> List[Job]:
     """Run a single scraper with error handling. Returns jobs or empty list on failure."""
-    try:
-        jobs = await scraper.scrape()
-        logger.info(f"Scraped {len(jobs)} jobs from {scraper.source_name}")
-        return jobs
-    except Exception as e:
-        logger.error(f"Failed to scrape {scraper.source_name}: {e}")
-        return []
+    async with _get_scraper_semaphore():
+        if progress_entry is not None:
+            progress_entry["status"] = "running"
+        try:
+            jobs = await scraper.scrape()
+            logger.info(f"Scraped {len(jobs)} jobs from {scraper.source_name}")
+            if progress_entry is not None:
+                progress_entry["status"] = "done"
+                progress_entry["jobs_found"] = len(jobs)
+            return jobs
+        except Exception as e:
+            logger.error(f"Failed to scrape {scraper.source_name}: {e}")
+            if progress_entry is not None:
+                progress_entry["status"] = "error"
+                progress_entry["error"] = str(e)[:200]
+            return []
 
 
 # Same order as scrape_all_jobs() — used by get_scrape_sources_metadata() for the dashboard.
@@ -3555,14 +3592,37 @@ def get_scrape_sources_metadata() -> List[Dict[str, Any]]:
     return out
 
 
-async def scrape_all_jobs() -> List[Job]:
-    """Scrape all job sources concurrently for maximum speed"""
+async def scrape_all_jobs(progress: Optional[Dict] = None) -> List[Job]:
+    """Scrape all job sources concurrently (semaphore-limited to avoid browser SIGSEGV)."""
+    global _scraper_semaphore
+    _scraper_semaphore = asyncio.Semaphore(5)  # fresh semaphore per scrape run
+
     scrapers = [cls() for _, cls in SCRAPER_SPECS]
 
-    # Run all scrapers concurrently (massive speed improvement)
-    # Each scraper has its own error handling so one failure won't affect others
-    logger.info(f"Launching {len(scrapers)} scrapers concurrently...")
-    results = await asyncio.gather(*[_scrape_single(s) for s in scrapers])
+    # Pre-warm browser once so all scrapers share the same instance (no concurrent launches)
+    await PlaywrightBrowserManager.get_browser()
+
+    # Pre-allocate progress entries (one per scraper, in SCRAPER_SPECS order)
+    prog_entries: List[Optional[Dict]] = []
+    if progress is not None:
+        progress["phase"] = "scrapers"
+        progress["scraper_results"] = []
+        for cat, _ in SCRAPER_SPECS:
+            s = scrapers[len(prog_entries)]
+            entry: Dict[str, Any] = {
+                "name": s.source_name,
+                "category": cat,
+                "status": "pending",
+                "jobs_found": 0,
+                "error": None,
+            }
+            progress["scraper_results"].append(entry)
+            prog_entries.append(entry)
+    else:
+        prog_entries = [None] * len(scrapers)  # type: ignore[list-item]
+
+    logger.info(f"Launching {len(scrapers)} scrapers (max 5 concurrent via semaphore)...")
+    results = await asyncio.gather(*[_scrape_single(s, e) for s, e in zip(scrapers, prog_entries)])
 
     all_jobs = []
     for jobs in results:
@@ -3938,85 +3998,105 @@ def release_lock():
         logger.warning(f"Error releasing lock: {e}")
 
 
-async def run_daily_scrape_async(is_startup_run: bool = False):
+async def run_daily_scrape_async(is_startup_run: bool = False, progress: Optional[Dict] = None):
     """Main async function to run daily scrape
-    
+
     Args:
         is_startup_run: True if this is the first run on startup (show all weak matches immediately),
                        False if this is a scheduled run (split weak matches to 9:05 AM)
+        progress: Optional dict (owned by api/app.py _scrape_state) updated with live progress.
     """
+    def _prog(phase: str, **kw: Any) -> None:
+        if progress is not None:
+            progress["phase"] = phase
+            progress.update(kw)
+
     # Check for lock file to prevent multiple instances
     # Add a longer random delay to prevent race conditions when schedule triggers multiple times
     # This gives time for any previous instance to finish and release the lock
     delay = random.uniform(1.0, 3.0)  # Random delay 1-3 seconds
     logger.info(f"Waiting {delay:.2f}s before acquiring lock...")
+    _prog("starting")
     await asyncio.sleep(delay)
-    
+
     if not acquire_lock():
         logger.warning("Another instance is running. Exiting to prevent duplicates.")
+        _prog("error", error="Another scrape instance is already running.")
         return
-    
+
     try:
         logger.info("=" * 60)
         logger.info("Starting daily job scrape...")
         logger.info("=" * 60)
-        
+
         # Load seen jobs (both URLs and titles)
+        _prog("loading")
         seen_urls, seen_titles = load_seen_jobs()
-        
+
         # Scrape all jobs
-        jobs = await scrape_all_jobs()
-        
+        jobs = await scrape_all_jobs(progress=progress)
+
         logger.info(f"Total jobs found: {len(jobs)}")
-        
+
         # Filter out blacklisted jobs (already done in parsers, but double-check)
+        _prog("ranking")
         filtered_jobs = [j for j in jobs if j.priority != JobPriority.BLACKLISTED]
-        
+        blacklisted_count = len(jobs) - len(filtered_jobs)
+
         # Deduplicate: filter out jobs we've already seen (by URL or title)
         new_jobs = []
         skipped_count = 0
         skipped_urls = 0
         skipped_titles = 0
-        
+
         for job in filtered_jobs:
             normalized_url = normalize_url(job.url)
             normalized_title = normalize_title(job.title)
-            
+
             # Check both URL and title for duplicates
             if normalized_url in seen_urls:
                 skipped_urls += 1
                 skipped_count += 1
                 continue
-            
+
             if normalized_title in seen_titles:
                 skipped_titles += 1
                 skipped_count += 1
                 continue
-            
+
             # New job - add to both dicts with today's date
             new_jobs.append(job)
             today = datetime.now().strftime("%Y-%m-%d")
             seen_urls[normalized_url] = today
             seen_titles[normalized_title] = today
-        
+
         if skipped_count > 0:
             logger.info(f"Skipped {skipped_count} duplicate jobs ({skipped_urls} by URL, {skipped_titles} by title)")
-        
-        logger.info(f"New jobs to send: {len(new_jobs)}")
 
+        logger.info(f"New jobs to send: {len(new_jobs)}")
+        if progress is not None:
+            progress["totals"] = {
+                "scraped": len(jobs),
+                "blacklisted": blacklisted_count,
+                "skipped": skipped_count,
+                "new": len(new_jobs),
+            }
+
+        _prog("saving")
         if new_jobs:
             try:
                 day = datetime.now().strftime("%Y-%m-%d")
                 append_jobs_for_date(day, [j.to_dict() for j in new_jobs])
             except Exception as e:
                 logger.warning("Could not persist job history: %s", e)
-        
+
         # Save seen jobs IMMEDIATELY after deduplication (before sending to Discord)
         # This prevents race condition where multiple instances send same jobs
         # Save even if no new jobs (to update the file timestamp)
         save_seen_jobs(seen_urls, seen_titles)
-        
+
         # Only send to Discord if there are new jobs
+        _prog("discord")
         if new_jobs:
             # Send to Discord if webhook is configured
             # SECURITY: Webhook URL must be set via environment variable or .env file
@@ -4068,9 +4148,13 @@ async def run_daily_scrape_async(is_startup_run: bool = False):
                     print(f"  Source: {job.source}")
         else:
             logger.info("No new jobs to send to Discord")
-        
+
+        _prog("done")
         logger.info("Daily scrape completed!")
         logger.info("=" * 60)
+    except Exception as exc:
+        _prog("error", error=str(exc)[:400])
+        raise
     finally:
         # Close browser after scraping
         await PlaywrightBrowserManager.close_browser()

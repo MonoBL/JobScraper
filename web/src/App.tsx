@@ -14,6 +14,24 @@ function openSettingsInNewTab() {
   window.open(url, "_blank", "noopener,noreferrer");
 }
 
+type ScraperResult = {
+  name: string;
+  category: string;
+  status: string;
+  jobs_found: number;
+  error: string | null;
+};
+
+type ScrapeStatus = {
+  running?: boolean;
+  phase?: string | null;
+  scrapers_total?: number;
+  scrapers_done?: number;
+  scraper_results?: ScraperResult[];
+  totals?: { scraped: number; blacklisted: number; skipped: number; new: number } | null;
+  error?: string | null;
+};
+
 type JobRow = {
   title: string;
   company: string;
@@ -267,6 +285,8 @@ export default function App({ initialView = "dashboard" }: AppProps) {
   const [scrapeMsg, setScrapeMsg] = useState<string | null>(null);
   const [scrapePolling, setScrapePolling] = useState(false);
   const [scrapePhaseIdx, setScrapePhaseIdx] = useState(0);
+  const [scrapeDebugOpen, setScrapeDebugOpen] = useState(false);
+  const [scrapeStatus, setScrapeStatus] = useState<ScrapeStatus>({});
   const [nextRunAtMs, setNextRunAtMs] = useState<number | null>(null);
   const [scheduleTimeLabel, setScheduleTimeLabel] = useState("09:00");
   const [countdownSec, setCountdownSec] = useState(0);
@@ -672,11 +692,21 @@ export default function App({ initialView = "dashboard" }: AppProps) {
       try {
         const r = await apiFetch("/api/scrape-status");
         if (!r.ok) return;
-        const d = (await r.json()) as { running?: boolean };
+        const d = (await r.json()) as ScrapeStatus;
+        setScrapeStatus(d);
         if (!d.running) {
           setScrapePolling(false);
           setScrapeBusy(false);
-          setScrapeMsg("Scrape finished. Calendar updated.");
+          if (d.error) {
+            setScrapeMsg(`Error: ${d.error}`);
+          } else {
+            const t = d.totals;
+            setScrapeMsg(
+              t
+                ? `Done — ${t.scraped} scraped · ${t.new} new · ${t.blacklisted} filtered · ${t.skipped} duplicates`
+                : "Scrape finished. Calendar updated."
+            );
+          }
           await loadSummaries().catch(() => undefined);
           await loadSchedule().catch(() => undefined);
           setJobsRefresh((x) => x + 1);
@@ -897,13 +927,37 @@ export default function App({ initialView = "dashboard" }: AppProps) {
 
   const displayAgents = agents.length > 0 ? agents : FALLBACK_AGENTS;
   const scrapePhaseText = useMemo(() => {
+    const phase = scrapeStatus.phase;
+    const total = scrapeStatus.scrapers_total ?? 0;
+    const done = scrapeStatus.scrapers_done ?? 0;
+    if (phase === "scrapers" && total > 0) return `Running scrapers… (${done}/${total} done)`;
+    if (phase === "ranking") return "Ranking & deduplicating jobs…";
+    if (phase === "saving") return "Saving history…";
+    if (phase === "discord") return "Sending Discord notification…";
+    if (phase === "done") return "Done.";
+    if (phase === "error") return `Error: ${scrapeStatus.error ?? "unknown"}`;
+    // fallback: cycling status messages
     const base = SCRAPE_PHASE_MESSAGES[scrapePhaseIdx];
     if (scrapePhaseIdx === SCRAPE_PHASE_MESSAGES.length - 1) {
       const names = displayAgents.map((a) => a.label).join(" · ");
       return names ? `${base} (${names})` : base;
     }
     return base;
-  }, [scrapePhaseIdx, displayAgents]);
+  }, [scrapeStatus, scrapePhaseIdx, displayAgents]);
+
+  const scrapeProgressPct = useMemo(() => {
+    const phase = scrapeStatus.phase;
+    if (!phase || phase === "starting" || phase === "loading") return 5;
+    if (phase === "scrapers") {
+      const total = scrapeStatus.scrapers_total ?? 1;
+      const done = scrapeStatus.scrapers_done ?? 0;
+      return Math.round(10 + (done / total) * 70);
+    }
+    if (phase === "ranking") return 82;
+    if (phase === "saving") return 90;
+    if (phase === "discord") return 96;
+    return 100;
+  }, [scrapeStatus]);
   /** Only disable LLM actions when health explicitly reports no API key — not while loading or on fetch failure. */
   const llmDisabled = health.agent === false;
 
@@ -988,13 +1042,44 @@ export default function App({ initialView = "dashboard" }: AppProps) {
         </div>
         {route === "dashboard" && scrapePolling && (
           <div className="scrape-progress" aria-busy="true">
-            <div className="scrape-progress-bar indeterminate" />
+            <div className="scrape-progress-track">
+              <div className="scrape-progress-bar" style={{ width: `${scrapeProgressPct}%` }} />
+            </div>
             <p className="scrape-progress-label">{scrapePhaseText}</p>
           </div>
         )}
-        {route === "dashboard" && scrapeMsg && !scrapePolling && <p className="scrape-msg">{scrapeMsg}</p>}
+        {route === "dashboard" && scrapeMsg && !scrapePolling && (
+          <div className={`scrape-msg${scrapeStatus.error ? " scrape-msg-error" : ""}`}>
+            <span>{scrapeMsg}</span>
+            {(scrapeStatus.scraper_results ?? []).length > 0 && (
+              <button
+                type="button"
+                className="debug-toggle"
+                onClick={() => setScrapeDebugOpen((v) => !v)}
+              >
+                {scrapeDebugOpen ? "Hide debug ▲" : "Show debug ▼"}
+              </button>
+            )}
+          </div>
+        )}
         {route === "dashboard" && scrapeMsg && scrapePolling && (
           <p className="scrape-msg scrape-msg-muted">{scrapeMsg}</p>
+        )}
+        {route === "dashboard" && !scrapePolling && scrapeDebugOpen && (scrapeStatus.scraper_results ?? []).length > 0 && (
+          <div className="scrape-debug">
+            {(scrapeStatus.scraper_results ?? []).map((s) => {
+              const icon = s.status === "done" && s.jobs_found > 0 ? "✓" : s.status === "done" ? "○" : s.status === "error" ? "✗" : s.status === "running" ? "●" : "·";
+              const cls = s.status === "done" && s.jobs_found > 0 ? "dbg-ok" : s.status === "error" ? "dbg-err" : s.status === "done" ? "dbg-warn" : "dbg-muted";
+              return (
+                <div key={s.name} className={`dbg-row ${cls}`}>
+                  <span className="dbg-icon">{icon}</span>
+                  <span className="dbg-name">{s.name}</span>
+                  <span className="dbg-cat">{s.category}</span>
+                  <span className="dbg-count">{s.status === "error" ? s.error ?? "error" : `${s.jobs_found} jobs`}</span>
+                </div>
+              );
+            })}
+          </div>
         )}
       </header>
 

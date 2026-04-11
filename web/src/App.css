@@ -389,12 +389,65 @@ body {
   margin: 0.65rem 0 0;
   font-size: 0.9rem;
   color: var(--perfect);
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.scrape-msg-error {
+  color: var(--danger);
 }
 
 .scrape-msg-muted {
   color: var(--muted);
   font-size: 0.85rem;
 }
+
+.debug-toggle {
+  font-size: 0.78rem;
+  padding: 0.1rem 0.5rem;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.debug-toggle:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.scrape-debug {
+  margin: 0.5rem 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 42rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+}
+
+.dbg-row {
+  display: grid;
+  grid-template-columns: 1.2rem 1fr 4rem 6rem;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  align-items: center;
+}
+
+.dbg-icon { font-size: 0.75rem; }
+.dbg-name { font-weight: 500; }
+.dbg-cat  { color: var(--muted); font-size: 0.75rem; }
+.dbg-count { text-align: right; font-variant-numeric: tabular-nums; }
+
+.dbg-ok   { color: var(--perfect); }
+.dbg-warn { color: var(--muted); }
+.dbg-err  { color: var(--danger); }
+.dbg-muted { color: var(--muted); opacity: 0.6; }
 
 .schedule-hint {
   margin: 0.35rem 0 0;
@@ -418,36 +471,19 @@ body {
   max-width: 36rem;
 }
 
-.scrape-progress-bar {
+.scrape-progress-track {
   height: 4px;
   border-radius: 4px;
   background: var(--border);
   overflow: hidden;
 }
 
-.scrape-progress-bar.indeterminate {
-  position: relative;
-}
-
-.scrape-progress-bar.indeterminate::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 40%;
+.scrape-progress-bar {
+  height: 100%;
   border-radius: 4px;
-  background: linear-gradient(90deg, var(--accent), rgba(91, 141, 239, 0.35));
-  animation: scrape-indeterminate 1.1s ease-in-out infinite;
-}
-
-@keyframes scrape-indeterminate {
-  0% {
-    transform: translateX(-100%);
-  }
-  100% {
-    transform: translateX(350%);
-  }
+  background: linear-gradient(90deg, var(--accent), var(--perfect));
+  transition: width 0.6s ease;
+  min-width: 4px;
 }
 
 .scrape-progress-label {

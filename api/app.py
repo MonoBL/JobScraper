@@ -47,7 +47,14 @@ from job_agent import (
 logger = logging.getLogger(__name__)
 
 # Manual "Scrape now" from API (single-process; used for UI loading state)
-_scrape_state: Dict[str, Any] = {"running": False, "started_at": None}
+_scrape_state: Dict[str, Any] = {
+    "running": False,
+    "started_at": None,
+    "phase": None,           # "starting"|"loading"|"scrapers"|"ranking"|"saving"|"discord"|"done"|"error"
+    "scraper_results": [],   # [{name, category, status, jobs_found, error}]
+    "totals": None,          # {scraped, blacklisted, skipped, new}  — filled after ranking
+    "error": None,           # fatal error string
+}
 
 app = FastAPI(title="Job Scraper Dashboard API", version="1.0.0")
 
@@ -362,20 +369,36 @@ def schedule_info() -> Dict[str, Any]:
 
 @protected.get("/scrape-status")
 def scrape_status() -> Dict[str, Any]:
-    """Whether a manual scrape started from this API is still running."""
+    """Live status of a manual scrape started from this API."""
+    results = _scrape_state.get("scraper_results") or []
+    done = sum(1 for s in results if s.get("status") in ("done", "error"))
     return {
         "running": bool(_scrape_state["running"]),
         "started_at": _scrape_state["started_at"],
+        "phase": _scrape_state.get("phase"),
+        "scrapers_total": len(results),
+        "scrapers_done": done,
+        "scraper_results": results,
+        "totals": _scrape_state.get("totals"),
+        "error": _scrape_state.get("error"),
     }
 
 
 async def _run_scrape_now_task() -> None:
+    # Reset progress fields before starting
+    _scrape_state["phase"] = "starting"
+    _scrape_state["scraper_results"] = []
+    _scrape_state["totals"] = None
+    _scrape_state["error"] = None
     try:
         from main import run_daily_scrape_async
 
-        await run_daily_scrape_async(is_startup_run=True)
+        await run_daily_scrape_async(is_startup_run=True, progress=_scrape_state)
     except Exception:
         logger.exception("Background scrape-now failed")
+        if not _scrape_state.get("error"):
+            _scrape_state["error"] = "Unexpected error in scrape task — check server logs."
+        _scrape_state["phase"] = "error"
     finally:
         _scrape_state["running"] = False
         _scrape_state["started_at"] = None
