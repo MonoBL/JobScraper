@@ -235,3 +235,88 @@ def evaluate_job(
     except Exception as e:
         logger.warning("Agent %s evaluation failed: %s", agent_id, e)
         return None
+
+
+def _resume_profile_model() -> str:
+    o = os.getenv("AGENT_RESUME_PROFILE_MODEL", "").strip()
+    if o:
+        return o
+    return _default_model_for_agent("critique")
+
+
+def review_resume_for_search_profile(resume_text: str) -> Optional[Dict[str, Any]]:
+    """
+    Compare resume text to built-in JobRanker baselines; return JSON with *_add lists
+    to merge into ranker_overrides.json. None if API missing, resume too short, or LLM error.
+    """
+    key = _api_key()
+    if not key:
+        return None
+
+    text = (resume_text or "").strip()
+    if len(text) < 40:
+        return None
+
+    from ranker_profile import baseline_for_llm
+
+    baseline = baseline_for_llm()
+    system = (
+        "You align a candidate's resume with an automated job-ranking system used by a Python scraper. "
+        "Jobs are scored using substring matches on job title and description against phrase lists "
+        "(perfect/good titles, keyword groups, optional blacklist title phrases). "
+        "Suggest ONLY concise phrases to ADD — lowercase where possible, 2–8 words for titles. "
+        "Do not duplicate items already listed in baseline_rules. "
+        "Derive suggestions from the resume: technologies, certifications, role titles, domains. "
+        "For blacklist_*_add, only add job TITLE phrases the user should not be matched to. "
+        "Cruise fields apply to ship/maritime IT jobs only. "
+        "Respond ONLY with valid JSON, no markdown or code fences."
+    )
+    hint = (
+        '{"summary":"one paragraph for the user","perfect_titles_add":[],"good_titles_add":[],'
+        '"perfect_keywords_add":{"linux":[],"scripting":[],"infrastructure":[],"automation":[]},'
+        '"good_keywords_add":[],"strong_title_phrases_add":[],"blacklist_titles_add":[],"blacklist_keywords_title_add":[],'
+        '"cruise_perfect_titles_add":[],"cruise_good_titles_add":[],"cruise_it_keywords_add":[],'
+        '"notes_for_search":"short technical note"}'
+    )
+    user = json.dumps(
+        {
+            "task": f"Output JSON matching this shape exactly: {hint}",
+            "baseline_rules": baseline,
+            "resume_text": text[:12000],
+        },
+        ensure_ascii=False,
+    )
+
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
+    if "openrouter.ai" in _base_url():
+        ref = os.getenv("OPENROUTER_HTTP_REFERER", "").strip()
+        if ref:
+            headers["Referer"] = ref
+        headers["X-Title"] = os.getenv("OPENROUTER_APP_TITLE", "Job Scraper Dashboard")
+
+    resolved_model = _resume_profile_model()
+    try:
+        r = requests.post(
+            _chat_completions_url(),
+            headers=headers,
+            json={
+                "model": resolved_model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "temperature": 0.15,
+                "max_tokens": 2500,
+            },
+            timeout=120,
+        )
+        r.raise_for_status()
+        data = r.json()
+        raw = data["choices"][0]["message"]["content"].strip()
+        return _parse_json_response(raw)
+    except Exception as e:
+        logger.warning("Resume profile review failed: %s", e)
+        return None

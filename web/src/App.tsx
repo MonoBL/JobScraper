@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { apiFetch, setToken } from "./api";
 import Login, { fetchAuthStatus, fetchSessionValid } from "./Login";
 
@@ -127,6 +127,28 @@ const PRI_ORDER: Record<string, number> = {
   WEAK_MATCH: 2,
 };
 
+/** Status lines while a manual scrape runs (scrapers + ranker; AI agents run on job cards after). */
+const SCRAPE_PHASE_MESSAGES = [
+  "Starting Playwright & scrapers…",
+  "Crypto / Web3 job boards…",
+  "Cruise & maritime sources…",
+  "General & remote listings…",
+  "Ranking with JobRanker…",
+  "Saving history & Discord…",
+  "AI agents (fit / critique / checklist) work on cards next…",
+];
+
+function formatCountdown(totalSeconds: number): string {
+  const s = Math.max(0, Math.floor(totalSeconds));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const sec = s % 60;
+  if (m < 60) return sec > 0 ? `${m}m ${sec}s` : `${m}m`;
+  const h = Math.floor(m / 60);
+  const mm = m % 60;
+  return mm > 0 ? `${h}h ${mm}m` : `${h}h`;
+}
+
 function startOfMonth(d: Date): Date {
   return new Date(d.getFullYear(), d.getMonth(), 1);
 }
@@ -170,7 +192,24 @@ export default function App() {
   const [expandedDesc, setExpandedDesc] = useState<Record<string, boolean>>({});
   const [scrapeBusy, setScrapeBusy] = useState(false);
   const [scrapeMsg, setScrapeMsg] = useState<string | null>(null);
+  const [scrapePolling, setScrapePolling] = useState(false);
+  const [scrapePhaseIdx, setScrapePhaseIdx] = useState(0);
+  const [nextRunAtMs, setNextRunAtMs] = useState<number | null>(null);
+  const [scheduleTimeLabel, setScheduleTimeLabel] = useState("09:00");
+  const [countdownSec, setCountdownSec] = useState(0);
+  const [scheduleLoaded, setScheduleLoaded] = useState(false);
   const [jobsRefresh, setJobsRefresh] = useState(0);
+  const [profile, setProfile] = useState<{
+    has_resume: boolean;
+    resume_chars: number;
+    overrides_updated_at: string | null;
+    last_summary: string;
+    override_counts: Record<string, number>;
+  } | null>(null);
+  const [resumeUploading, setResumeUploading] = useState(false);
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const [profileMsg, setProfileMsg] = useState<string | null>(null);
+  const resumeFileRef = useRef<HTMLInputElement>(null);
 
   const countByDate = useMemo(() => {
     const m = new Map<string, number>();
@@ -206,6 +245,44 @@ export default function App() {
       }
     } catch {
       setAgents([]);
+    }
+  }, []);
+
+  const loadProfile = useCallback(async () => {
+    try {
+      const r = await apiFetch("/api/profile");
+      if (!r.ok) return;
+      setProfile(await r.json());
+    } catch {
+      setProfile(null);
+    }
+  }, []);
+
+  const loadSchedule = useCallback(async () => {
+    try {
+      const r = await apiFetch("/api/schedule");
+      if (!r.ok) return;
+      const data = (await r.json()) as {
+        schedule_time?: string;
+        next_run_iso?: string;
+        seconds_until_next?: number;
+      };
+      if (typeof data.schedule_time === "string") {
+        setScheduleTimeLabel(data.schedule_time);
+      }
+      if (data.next_run_iso) {
+        const ms = Date.parse(data.next_run_iso);
+        if (!Number.isNaN(ms)) {
+          setNextRunAtMs(ms);
+        } else if (typeof data.seconds_until_next === "number") {
+          setNextRunAtMs(Date.now() + data.seconds_until_next * 1000);
+        }
+      } else if (typeof data.seconds_until_next === "number") {
+        setNextRunAtMs(Date.now() + data.seconds_until_next * 1000);
+      }
+      setScheduleLoaded(true);
+    } catch {
+      /* ignore */
     }
   }, []);
 
@@ -248,7 +325,58 @@ export default function App() {
     loadHealth();
     loadAgents();
     loadSummaries().catch(() => setSummaries([]));
-  }, [authPhase, loadSummaries, loadHealth, loadAgents]);
+    void loadSchedule();
+    void loadProfile();
+  }, [authPhase, loadSummaries, loadHealth, loadAgents, loadSchedule, loadProfile]);
+
+  useEffect(() => {
+    if (authPhase !== "ready") return;
+    const id = window.setInterval(() => void loadSchedule(), 60_000);
+    return () => window.clearInterval(id);
+  }, [authPhase, loadSchedule]);
+
+  useEffect(() => {
+    if (nextRunAtMs == null) return;
+    const tick = () => {
+      setCountdownSec(Math.max(0, Math.floor((nextRunAtMs - Date.now()) / 1000)));
+    };
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => window.clearInterval(id);
+  }, [nextRunAtMs]);
+
+  useEffect(() => {
+    if (!scrapePolling) return;
+    setScrapePhaseIdx(0);
+    const id = window.setInterval(() => {
+      setScrapePhaseIdx((p) => (p + 1) % SCRAPE_PHASE_MESSAGES.length);
+    }, 4000);
+    return () => window.clearInterval(id);
+  }, [scrapePolling]);
+
+  useEffect(() => {
+    if (!scrapePolling) return;
+    const poll = async () => {
+      try {
+        const r = await apiFetch("/api/scrape-status");
+        if (!r.ok) return;
+        const d = (await r.json()) as { running?: boolean };
+        if (!d.running) {
+          setScrapePolling(false);
+          setScrapeBusy(false);
+          setScrapeMsg("Scrape finished. Calendar updated.");
+          await loadSummaries().catch(() => undefined);
+          await loadSchedule().catch(() => undefined);
+          setJobsRefresh((x) => x + 1);
+        }
+      } catch {
+        /* ignore */
+      }
+    };
+    void poll();
+    const id = window.setInterval(() => void poll(), 1500);
+    return () => window.clearInterval(id);
+  }, [scrapePolling, loadSummaries, loadSchedule]);
 
   useEffect(() => {
     if (authPhase !== "ready") return;
@@ -282,6 +410,73 @@ export default function App() {
     };
   }, [selectedDate, jobsRefresh, authPhase]);
 
+  async function uploadResumeFile() {
+    const input = resumeFileRef.current;
+    const f = input?.files?.[0];
+    if (!f) {
+      setProfileMsg("Choose a PDF file first.");
+      return;
+    }
+    setResumeUploading(true);
+    setProfileMsg(null);
+    try {
+      const fd = new FormData();
+      fd.append("file", f);
+      const r = await apiFetch("/api/profile/resume", { method: "POST", body: fd });
+      const data = (await r.json().catch(() => ({}))) as { detail?: string; char_count?: number };
+      if (!r.ok) {
+        const det = data.detail;
+        const msg = typeof det === "string" ? det : r.statusText;
+        throw new Error(msg || r.statusText);
+      }
+      setProfileMsg(`Resume saved (${data.char_count ?? "?"} characters extracted). Run “Update ranker from resume”.`);
+      if (input) input.value = "";
+      await loadProfile();
+    } catch (e: unknown) {
+      setProfileMsg(e instanceof Error ? e.message : "Upload failed");
+    } finally {
+      setResumeUploading(false);
+    }
+  }
+
+  async function reviewResumeProfile() {
+    setReviewBusy(true);
+    setProfileMsg(null);
+    try {
+      const r = await apiFetch("/api/profile/review-resume", { method: "POST" });
+      const data = (await r.json().catch(() => ({}))) as { detail?: string; summary?: string };
+      if (!r.ok) {
+        const det = data.detail;
+        const msg = typeof det === "string" ? det : r.statusText;
+        throw new Error(msg || r.statusText);
+      }
+      setProfileMsg(data.summary || "Ranker overrides updated for the next scrape.");
+      await loadProfile();
+    } catch (e: unknown) {
+      setProfileMsg(e instanceof Error ? e.message : "Review failed");
+    } finally {
+      setReviewBusy(false);
+    }
+  }
+
+  async function clearRankerOverrides() {
+    if (
+      !window.confirm(
+        "Clear all LLM-added ranker phrases? Built-in rules in main.py are unchanged."
+      )
+    ) {
+      return;
+    }
+    try {
+      const r = await apiFetch("/api/profile/overrides", { method: "DELETE" });
+      if (!r.ok) throw new Error("Could not clear overrides");
+      setProfileMsg("Ranker overrides cleared.");
+      await loadProfile();
+    } catch (e: unknown) {
+      setProfileMsg(e instanceof Error ? e.message : "Failed");
+    }
+  }
+
   async function triggerScrapeNow() {
     setScrapeMsg(null);
     setScrapeBusy(true);
@@ -300,14 +495,10 @@ export default function App() {
               : r.statusText;
         throw new Error(msg || r.statusText);
       }
-      setScrapeMsg(typeof data.detail === "string" ? data.detail : "Scrape started.");
-      window.setTimeout(() => {
-        loadSummaries().catch(() => undefined);
-        setJobsRefresh((x) => x + 1);
-      }, 90_000);
+      setScrapeMsg(typeof data.detail === "string" ? data.detail : "Scrape running…");
+      setScrapePolling(true);
     } catch (e: unknown) {
       setScrapeMsg(e instanceof Error ? e.message : "Request failed");
-    } finally {
       setScrapeBusy(false);
     }
   }
@@ -392,6 +583,14 @@ export default function App() {
   }
 
   const displayAgents = agents.length > 0 ? agents : FALLBACK_AGENTS;
+  const scrapePhaseText = useMemo(() => {
+    const base = SCRAPE_PHASE_MESSAGES[scrapePhaseIdx];
+    if (scrapePhaseIdx === SCRAPE_PHASE_MESSAGES.length - 1) {
+      const names = displayAgents.map((a) => a.label).join(" · ");
+      return names ? `${base} (${names})` : base;
+    }
+    return base;
+  }, [scrapePhaseIdx, displayAgents]);
   const agentsReady = health.agent === true || health.agents_enabled === true;
 
   const todayIso = isoDate(new Date());
@@ -421,6 +620,13 @@ export default function App() {
               </code>{" "}
               (JobRanker).
             </p>
+            <p className="schedule-hint">
+              Next automatic scrape in{" "}
+              <strong>{scheduleLoaded ? formatCountdown(countdownSec) : "…"}</strong>
+              {" · "}
+              scheduled at <strong>{scheduleTimeLabel}</strong> (server time,{" "}
+              <code className="schedule-env">SCRAPE_SCHEDULE_TIME</code>)
+            </p>
           </div>
           <div className="scrape-now">
             {requireLogin && (
@@ -429,12 +635,76 @@ export default function App() {
               </button>
             )}
             <button type="button" disabled={scrapeBusy} onClick={() => void triggerScrapeNow()}>
-              {scrapeBusy ? "Starting…" : "Scrape now"}
+              {scrapeBusy ? "Scraping…" : "Scrape now"}
             </button>
           </div>
         </div>
-        {scrapeMsg && <p className="scrape-msg">{scrapeMsg}</p>}
+        {scrapePolling && (
+          <div className="scrape-progress" aria-busy="true">
+            <div className="scrape-progress-bar indeterminate" />
+            <p className="scrape-progress-label">{scrapePhaseText}</p>
+          </div>
+        )}
+        {scrapeMsg && !scrapePolling && <p className="scrape-msg">{scrapeMsg}</p>}
+        {scrapeMsg && scrapePolling && (
+          <p className="scrape-msg scrape-msg-muted">{scrapeMsg}</p>
+        )}
       </header>
+
+      <section className="profile-panel" aria-label="Resume and search profile">
+        <h3 className="profile-heading">Resume &amp; search ranking</h3>
+        <p className="profile-lead">
+          Upload your CV as PDF. An LLM compares it to the built-in JobRanker lists in{" "}
+          <code className="schedule-env">main.py</code> and saves <strong>additional</strong> title and
+          keyword phrases to{" "}
+          <code className="schedule-env">data/ranker_overrides.json</code>. The next scrape uses those
+          extras so matches align better with your background.
+        </p>
+        <div className="profile-row">
+          <input
+            ref={resumeFileRef}
+            type="file"
+            accept="application/pdf,.pdf"
+            className="profile-file"
+          />
+          <button type="button" disabled={resumeUploading} onClick={() => void uploadResumeFile()}>
+            {resumeUploading ? "Uploading…" : "Upload PDF"}
+          </button>
+          <button
+            type="button"
+            className="profile-review-btn"
+            disabled={reviewBusy || !profile?.has_resume || health.agent === false}
+            onClick={() => void reviewResumeProfile()}
+          >
+            {reviewBusy ? "Updating ranker…" : "Update ranker from resume"}
+          </button>
+          <button type="button" className="sign-out-btn" onClick={() => void clearRankerOverrides()}>
+            Clear overrides
+          </button>
+        </div>
+        {health.agent === false && (
+          <p className="profile-hint">Set OPENROUTER_API_KEY or OPENAI_API_KEY to run resume review.</p>
+        )}
+        {profile && (
+          <p className="profile-meta">
+            Resume: {profile.has_resume ? `${profile.resume_chars} characters stored` : "none"} · Extra
+            phrases:{" "}
+            {(profile.override_counts?.perfect_titles ?? 0) +
+              (profile.override_counts?.good_titles ?? 0) +
+              (profile.override_counts?.good_keywords ?? 0) >
+            0
+              ? `${profile.override_counts.perfect_titles} perfect titles, ${profile.override_counts.good_titles} good titles, ${profile.override_counts.good_keywords} keywords`
+              : "none"}
+            {profile.overrides_updated_at ? ` · updated ${profile.overrides_updated_at}` : ""}
+          </p>
+        )}
+        {profile?.last_summary ? (
+          <p className="profile-summary">
+            <strong>Last review:</strong> {profile.last_summary}
+          </p>
+        ) : null}
+        {profileMsg ? <p className="profile-msg">{profileMsg}</p> : null}
+      </section>
 
       <div className="layout">
         <div className="panel">

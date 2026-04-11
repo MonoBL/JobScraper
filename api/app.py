@@ -12,6 +12,7 @@ import logging
 import os
 import sys
 import time
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 import jwt
@@ -30,13 +31,21 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Header, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from job_history import get_jobs_for_date, list_date_summaries, today_iso
-from job_agent import evaluate_job, is_agent_configured, list_agents
+from job_agent import (
+    evaluate_job,
+    is_agent_configured,
+    list_agents,
+    review_resume_for_search_profile,
+)
 
 logger = logging.getLogger(__name__)
+
+# Manual "Scrape now" from API (single-process; used for UI loading state)
+_scrape_state: Dict[str, Any] = {"running": False, "started_at": None}
 
 app = FastAPI(title="Job Scraper Dashboard API", version="1.0.0")
 
@@ -205,6 +214,111 @@ def agent_evaluate(body: AgentBody) -> Dict[str, Any]:
     return {"agent_id": body.agent_id, "result": result}
 
 
+@protected.get("/profile")
+def profile_get() -> Dict[str, Any]:
+    from ranker_profile import profile_status
+
+    return profile_status()
+
+
+@protected.post("/profile/resume")
+async def profile_upload_resume(file: UploadFile = File(...)) -> Dict[str, Any]:
+    from ranker_profile import save_resume_pdf
+
+    name = (file.filename or "").lower()
+    if not name.endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Upload a .pdf file.")
+    data = await file.read()
+    if len(data) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="PDF exceeds 5 MB.")
+    try:
+        out = save_resume_pdf(data)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        logger.exception("Resume PDF processing failed")
+        raise HTTPException(status_code=500, detail="Could not read PDF.")
+    return {"ok": True, **out}
+
+
+@protected.post("/profile/review-resume")
+def profile_review_resume() -> Dict[str, Any]:
+    from ranker_profile import apply_llm_overrides, load_resume_text
+
+    if not is_agent_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Set OPENROUTER_API_KEY or OPENAI_API_KEY to run resume review.",
+        )
+    text = load_resume_text()
+    if len(text) < 40:
+        raise HTTPException(status_code=400, detail="Upload a resume PDF first.")
+    patch = review_resume_for_search_profile(text)
+    if patch is None:
+        raise HTTPException(
+            status_code=502,
+            detail="Resume review failed (LLM error or invalid JSON).",
+        )
+    summary = str(patch.get("summary") or "")
+    apply_llm_overrides(patch, summary=summary)
+    preview = {
+        "perfect_titles_add": patch.get("perfect_titles_add"),
+        "good_titles_add": patch.get("good_titles_add"),
+        "notes_for_search": patch.get("notes_for_search"),
+    }
+    return {"ok": True, "summary": summary, "preview": preview}
+
+
+@protected.delete("/profile/overrides")
+def profile_clear_overrides() -> Dict[str, Any]:
+    from ranker_profile import clear_overrides_file
+
+    clear_overrides_file()
+    return {"ok": True}
+
+
+def _parse_schedule_time() -> tuple[int, int]:
+    raw = os.getenv("SCRAPE_SCHEDULE_TIME", "09:00").strip()
+    try:
+        parts = raw.replace(".", ":").split(":")
+        h = int(parts[0])
+        m = int(parts[1]) if len(parts) > 1 else 0
+        return max(0, min(23, h)), max(0, min(59, m))
+    except (ValueError, IndexError):
+        return 9, 0
+
+
+def _next_scheduled_run() -> tuple[datetime, float]:
+    """Next daily run in server local time (same as main.py scheduler)."""
+    hh, mm = _parse_schedule_time()
+    now = datetime.now()
+    target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    if now >= target:
+        target += timedelta(days=1)
+    return target, max(0.0, (target - now).total_seconds())
+
+
+@protected.get("/schedule")
+def schedule_info() -> Dict[str, Any]:
+    """Next automatic scrape (from SCRAPE_SCHEDULE_TIME, server clock)."""
+    hh, mm = _parse_schedule_time()
+    next_at, secs = _next_scheduled_run()
+    return {
+        "schedule_time": f"{hh:02d}:{mm:02d}",
+        "next_run_iso": next_at.isoformat(timespec="seconds"),
+        "seconds_until_next": int(secs),
+    }
+
+
+@protected.get("/scrape-status")
+def scrape_status() -> Dict[str, Any]:
+    """Whether a manual scrape started from this API is still running."""
+    return {
+        "running": bool(_scrape_state["running"]),
+        "started_at": _scrape_state["started_at"],
+    }
+
+
 async def _run_scrape_now_task() -> None:
     try:
         from main import run_daily_scrape_async
@@ -212,15 +326,26 @@ async def _run_scrape_now_task() -> None:
         await run_daily_scrape_async(is_startup_run=True)
     except Exception:
         logger.exception("Background scrape-now failed")
+    finally:
+        _scrape_state["running"] = False
+        _scrape_state["started_at"] = None
 
 
 @protected.post("/scrape-now")
 async def scrape_now(background_tasks: BackgroundTasks) -> Dict[str, Any]:
-    """Trigger one scrape (no extra code — dashboard login is enough)."""
+    """Trigger one scrape (dashboard auth). Exclusive while a run is in progress."""
+    if _scrape_state["running"]:
+        raise HTTPException(
+            status_code=409,
+            detail="A scrape is already running. Wait for it to finish.",
+        )
+    _scrape_state["running"] = True
+    _scrape_state["started_at"] = time.time()
     background_tasks.add_task(_run_scrape_now_task)
     return {
         "status": "started",
-        "detail": "Scrape started in the background. Wait a few minutes, then refresh or pick today on the calendar.",
+        "detail": "Scrape started in the background.",
+        "started_at": _scrape_state["started_at"],
     }
 
 

@@ -211,6 +211,19 @@ class JobRanker:
         Rank a job based on title and description.
         Returns (priority, reason)
         """
+        from ranker_profile import load_ranker_extras
+
+        ex = load_ranker_extras()
+        perfect_titles = JobRanker.PERFECT_TITLES + ex["perfect_titles"]
+        good_titles_list = JobRanker.GOOD_TITLES + ex["good_titles"]
+        good_kw = JobRanker.GOOD_KEYWORDS + ex["good_keywords"]
+        bl_titles = JobRanker.BLACKLIST_TITLES + ex["blacklist_titles"]
+        bl_kw_title = JobRanker.BLACKLIST_KEYWORDS_TITLE + ex["blacklist_keywords_title"]
+        pk = {
+            k: JobRanker.PERFECT_KEYWORDS[k] + ex["perfect_keywords"].get(k, [])
+            for k in JobRanker.PERFECT_KEYWORDS
+        }
+
         title_lower = JobRanker.normalize_text(title)
         desc_lower = JobRanker.normalize_text(description)
         combined = f"{title_lower} {desc_lower}"
@@ -240,9 +253,9 @@ class JobRanker:
                 return JobPriority.BLACKLISTED, f"Matches strict requirement pattern: {pattern}"
 
         # Blacklist phrases — titles are checked on job title; long phrases on full text
-        if JobRanker.contains_keywords(title_lower, JobRanker.BLACKLIST_TITLES):
+        if JobRanker.contains_keywords(title_lower, bl_titles):
             return JobPriority.BLACKLISTED, "Blacklisted job title phrase"
-        if JobRanker.contains_keywords(title_lower, JobRanker.BLACKLIST_KEYWORDS_TITLE):
+        if JobRanker.contains_keywords(title_lower, bl_kw_title):
             return JobPriority.BLACKLISTED, "Blacklisted title keyword"
         if JobRanker.contains_keywords(combined, JobRanker.BLACKLIST_KEYWORDS_FULLTEXT):
             return JobPriority.BLACKLISTED, "Blacklisted requirement phrase"
@@ -250,11 +263,11 @@ class JobRanker:
         # Check Perfect Match (need title + at least 1 keyword, OR just a strong IT title)
         # Strip seniority prefixes for better matching (e.g., "Staff DevOps Engineer" -> "DevOps Engineer")
         title_stripped = JobRanker.strip_seniority(title_lower)
-        has_perfect_title = JobRanker.contains_keywords(title_stripped, JobRanker.PERFECT_TITLES)
-        has_linux = JobRanker.contains_keywords(combined, JobRanker.PERFECT_KEYWORDS['linux'])
-        has_scripting = JobRanker.contains_keywords(combined, JobRanker.PERFECT_KEYWORDS['scripting'])
-        has_infra = JobRanker.contains_keywords(combined, JobRanker.PERFECT_KEYWORDS['infrastructure'])
-        has_automation = JobRanker.contains_keywords(combined, JobRanker.PERFECT_KEYWORDS['automation'])
+        has_perfect_title = JobRanker.contains_keywords(title_stripped, perfect_titles)
+        has_linux = JobRanker.contains_keywords(combined, pk["linux"])
+        has_scripting = JobRanker.contains_keywords(combined, pk["scripting"])
+        has_infra = JobRanker.contains_keywords(combined, pk["infrastructure"])
+        has_automation = JobRanker.contains_keywords(combined, pk["automation"])
 
         keyword_count = sum([has_linux, has_scripting, has_infra, has_automation])
         
@@ -268,12 +281,13 @@ class JobRanker:
                            'devops', 'sre', 'platform engineer', 'cloud engineer', 'infrastructure engineer',
                            'automation engineer', 'product engineer',
                            'chief technology officer', 'vp of engineering', 'head of engineering']
+            strong_titles = strong_titles + ex["strong_title_phrases"]
             if any(term in title_stripped for term in strong_titles):
                 return JobPriority.PERFECT_MATCH, "Perfect match: Strong IT/DevOps/SRE/Platform title"
 
         # Check Good Match (more lenient: title OR keywords)
-        has_good_title = JobRanker.contains_keywords(title_lower, JobRanker.GOOD_TITLES)
-        has_good_keywords = JobRanker.contains_keywords(combined, JobRanker.GOOD_KEYWORDS)
+        has_good_title = JobRanker.contains_keywords(title_lower, good_titles_list)
+        has_good_keywords = JobRanker.contains_keywords(combined, good_kw)
 
         if has_good_title and has_good_keywords:
             return JobPriority.GOOD_MATCH, "Good match: IT Support title + technical keywords"
@@ -334,12 +348,18 @@ class CruiseJobRanker:
 
     @staticmethod
     def rank_job(title: str, description: str) -> tuple[JobPriority, str]:
+        from ranker_profile import load_ranker_extras
+
+        ex = load_ranker_extras()
+        perfect = CruiseJobRanker.PERFECT_TITLES + ex["cruise_perfect_titles"]
+        good = CruiseJobRanker.GOOD_TITLES + ex["cruise_good_titles"]
+        it_kw = CruiseJobRanker.IT_KEYWORDS + ex["cruise_it_keywords"]
         combined = (title + " " + description).lower()
-        if any(t in combined for t in CruiseJobRanker.PERFECT_TITLES):
+        if any(t in combined for t in perfect):
             return JobPriority.PERFECT_MATCH, "Cruise IT: strong match"
-        if any(t in combined for t in CruiseJobRanker.GOOD_TITLES):
+        if any(t in combined for t in good):
             return JobPriority.GOOD_MATCH, "Cruise IT: good match"
-        if any(kw in combined for kw in CruiseJobRanker.IT_KEYWORDS):
+        if any(kw in combined for kw in it_kw):
             return JobPriority.WEAK_MATCH, "Cruise IT: weak match"
         return JobPriority.BLACKLISTED, "Not IT-related"
 
