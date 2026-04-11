@@ -207,6 +207,40 @@ export default function App() {
   const [statusHints, setStatusHints] = useState<Record<string, string>>({});
   const [discordNotificationsEnabled, setDiscordNotificationsEnabled] = useState<boolean | null>(null);
   const [discordToggleSaving, setDiscordToggleSaving] = useState(false);
+  const [agentDiagnostics, setAgentDiagnostics] = useState<{
+    configured?: boolean;
+    provider?: string | null;
+    base_url?: string | null;
+    agents?: Array<{
+      id: string;
+      label: string;
+      model: string;
+      model_source: string;
+      env_key: string;
+    }>;
+    resume_profile?: {
+      id: string;
+      label: string;
+      model: string;
+      model_source: string;
+      env_key: string;
+    } | null;
+  } | null>(null);
+  const [agentTestResults, setAgentTestResults] = useState<{
+    overall_ok?: boolean;
+    tested_at?: string;
+    results?: Array<{
+      id: string;
+      name: string;
+      model: string;
+      ok: boolean;
+      latency_ms?: number;
+      error?: string;
+      response_preview?: string;
+    }>;
+    error?: string;
+  } | null>(null);
+  const [agentTestLoading, setAgentTestLoading] = useState(false);
   const [agents, setAgents] = useState<AgentMeta[]>([]);
   const [agentBusy, setAgentBusy] = useState<string | null>(null);
   const [agentResults, setAgentResults] = useState<Record<string, Record<string, AgentResultEntry>>>(
@@ -286,6 +320,7 @@ export default function App() {
           auth: "error",
         });
         setDiscordNotificationsEnabled(null);
+        setAgentDiagnostics(null);
         setStatusCheckedAt(new Date());
         return;
       }
@@ -317,6 +352,7 @@ export default function App() {
         auth: "error",
       });
       setDiscordNotificationsEnabled(null);
+      setAgentDiagnostics(null);
       setStatusCheckedAt(new Date());
       return;
     }
@@ -324,13 +360,14 @@ export default function App() {
     const llmOk = healthJson?.agent === true;
     hint("llm", llmOk ? "API key set — agents enabled" : "No OPENROUTER_API_KEY / OPENAI_API_KEY");
 
-    const [agentsR, datesR, schedR, profR, sessR, notifR] = await Promise.all([
+    const [agentsR, datesR, schedR, profR, sessR, notifR, diagR] = await Promise.all([
       apiFetch("/api/agents"),
       apiFetch("/api/dates"),
       apiFetch("/api/schedule"),
       apiFetch("/api/profile"),
       requireLogin ? apiFetch("/api/auth/session") : Promise.resolve(null as Response | null),
       apiFetch("/api/settings/notifications"),
+      apiFetch("/api/agents/diagnostics"),
     ]);
 
     if (agentsR.ok) {
@@ -401,6 +438,16 @@ export default function App() {
       setDiscordNotificationsEnabled(null);
     }
 
+    if (diagR.ok) {
+      try {
+        setAgentDiagnostics(await diagR.json());
+      } catch {
+        setAgentDiagnostics(null);
+      }
+    } else {
+      setAgentDiagnostics(null);
+    }
+
     setDashStatus({
       api: "ok",
       llm: llmOk ? "ok" : "warn",
@@ -411,6 +458,51 @@ export default function App() {
     });
     setStatusCheckedAt(new Date());
   }, [requireLogin]);
+
+  const runAgentModelTests = useCallback(async () => {
+    setAgentTestLoading(true);
+    setAgentTestResults(null);
+    try {
+      const r = await apiFetch("/api/agents/test-models", { method: "POST" });
+      const data = (await r.json().catch(() => ({}))) as {
+        detail?: string | { msg?: string }[];
+        overall_ok?: boolean;
+        tested_at?: string;
+        results?: Array<{
+          id: string;
+          name: string;
+          model: string;
+          ok: boolean;
+          latency_ms?: number;
+          error?: string;
+          response_preview?: string;
+        }>;
+        error?: string;
+      };
+      if (!r.ok) {
+        const det = data.detail;
+        const msg =
+          typeof det === "string"
+            ? det
+            : Array.isArray(det)
+              ? det.map((x: { msg?: string }) => x.msg).filter(Boolean).join(", ")
+              : r.statusText;
+        setAgentTestResults({
+          overall_ok: false,
+          error: msg || r.statusText,
+        });
+        return;
+      }
+      setAgentTestResults(data);
+    } catch (e: unknown) {
+      setAgentTestResults({
+        overall_ok: false,
+        error: e instanceof Error ? e.message : "Request failed",
+      });
+    } finally {
+      setAgentTestLoading(false);
+    }
+  }, []);
 
   const saveDiscordNotifications = useCallback(async (enabled: boolean) => {
     setDiscordToggleSaving(true);
@@ -902,6 +994,118 @@ export default function App() {
           <p className="scrape-msg scrape-msg-muted">{scrapeMsg}</p>
         )}
       </header>
+
+      <section className="llm-agents-panel" aria-label="LLM models and connectivity">
+        <div className="llm-agents-head">
+          <h3 className="llm-agents-title">LLM agents &amp; models</h3>
+          <button
+            type="button"
+            className="llm-agents-test-btn"
+            disabled={llmDisabled || agentTestLoading}
+            title={
+              llmDisabled
+                ? "Set OPENROUTER_API_KEY or OPENAI_API_KEY on the server"
+                : "Send a tiny ping to each model (can take ~15–60s)"
+            }
+            onClick={() => void runAgentModelTests()}
+          >
+            {agentTestLoading ? "Testing…" : "Test models"}
+          </button>
+        </div>
+        {!agentDiagnostics?.configured && (
+          <p className="llm-agents-muted">Set an API key to see resolved models and run connectivity tests.</p>
+        )}
+        {agentDiagnostics?.configured && (
+          <>
+            <p className="llm-agents-meta">
+              Provider <code className="schedule-env">{agentDiagnostics.provider}</code> · API{" "}
+              <code className="llm-agents-url">{agentDiagnostics.base_url}</code>
+            </p>
+            <table className="llm-agents-table">
+              <thead>
+                <tr>
+                  <th>Agent</th>
+                  <th>Model</th>
+                  <th>Source</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(agentDiagnostics.agents ?? []).map((a) => (
+                  <tr key={a.id}>
+                    <td>{a.label}</td>
+                    <td>
+                      <code>{a.model}</code>
+                    </td>
+                    <td>
+                      {a.model_source === "env" ? (
+                        <>
+                          env (<code className="schedule-env">{a.env_key}</code>)
+                        </>
+                      ) : (
+                        "default"
+                      )}
+                    </td>
+                  </tr>
+                ))}
+                {agentDiagnostics.resume_profile ? (
+                  <tr>
+                    <td>{agentDiagnostics.resume_profile.label}</td>
+                    <td>
+                      <code>{agentDiagnostics.resume_profile.model}</code>
+                    </td>
+                    <td>
+                      {agentDiagnostics.resume_profile.model_source === "env" ? (
+                        <>
+                          env (
+                          <code className="schedule-env">{agentDiagnostics.resume_profile.env_key}</code>)
+                        </>
+                      ) : (
+                        "default"
+                      )}
+                    </td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </>
+        )}
+        {agentTestResults?.error ? (
+          <p className="err llm-agents-test-msg">{agentTestResults.error}</p>
+        ) : null}
+        {agentTestResults?.results && agentTestResults.results.length > 0 ? (
+          <div className="llm-agents-test-results">
+            <p className="llm-agents-test-summary">
+              {agentTestResults.overall_ok ? (
+                <span className="llm-test-ok">All model checks passed.</span>
+              ) : (
+                <span className="llm-test-bad">Some model checks failed.</span>
+              )}
+              {agentTestResults.tested_at ? (
+                <span className="llm-agents-muted"> {agentTestResults.tested_at}</span>
+              ) : null}
+            </p>
+            <ul className="llm-test-list">
+              {agentTestResults.results.map((r) => (
+                <li key={r.id} className={r.ok ? "llm-test-item ok" : "llm-test-item bad"}>
+                  <strong>{r.name}</strong> — <code>{r.model}</code>
+                  {r.ok ? (
+                    <>
+                      {" "}
+                      · OK ({r.latency_ms ?? "?"} ms)
+                      {r.response_preview ? ` · «${r.response_preview}»` : ""}
+                    </>
+                  ) : (
+                    <>
+                      {" "}
+                      · <span className="err">{r.error ?? "Failed"}</span>
+                    </>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+      </section>
 
       <section className="profile-panel" aria-label="Resume and search profile">
         <h3 className="profile-heading">Resume &amp; search ranking</h3>

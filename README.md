@@ -30,7 +30,7 @@
 | **Concurrent scraping** | All sources are scraped in parallel via `asyncio.gather` for maximum speed |
 | **Deduplication** | URL + title normalisation prevents the same job from appearing twice across runs |
 | **Discord reports** | Colour-coded embeds split into **Crypto / Web3** and **Cruise / Maritime IT** sections |
-| **Web dashboard** | React UI + FastAPI: calendar, LLM job agents, resume → ranker overrides, **system status**, **hard refresh**, **Discord on/off** (without stopping scrapes) |
+| **Web dashboard** | React UI + FastAPI: calendar, LLM job agents, **resolved models + connectivity test**, resume → ranker overrides, **system status**, **hard refresh**, **Discord on/off** (without stopping scrapes) |
 | **Stealth browsing** | Playwright with rotating User-Agents and anti-bot evasion |
 | **Retry logic** | Automatic retries with exponential back-off on transient page-load failures |
 | **Graceful shutdown** | Handles `SIGTERM` / `SIGINT` cleanly — safe for systemd and Docker |
@@ -146,6 +146,7 @@ cd web && npm install && npm run dev    # http://localhost:5173 — proxies /api
 ```
 
 - **System status** — pills for API, LLM, jobs, schedule, profile, and login; **Refresh status** re-checks endpoints; **Hard refresh** reloads the whole page.
+- **LLM agents & models** — shows provider, API base URL, each agent’s **resolved model** (default vs `AGENT_*_MODEL` env). **Test models** sends a minimal ping to each model (job agents + resume review) and reports latency / errors.
 - **Discord messages** — toggle stored in `data/app_settings.json` on the server. When **off**, `main.py` still scrapes and writes history but **does not** post to Discord (main report, 9:05 follow-up, or startup ping). You still need `DISCORD_WEBHOOK_URL` set when you want notifications again.
 
 ### Customising the Ranking

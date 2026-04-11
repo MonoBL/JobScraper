@@ -14,7 +14,9 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -37,6 +39,20 @@ def _base_url() -> str:
 
 def _chat_completions_url() -> str:
     return f"{_base_url()}/chat/completions"
+
+
+def _llm_headers() -> Dict[str, str]:
+    key = _api_key()
+    headers: Dict[str, str] = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
+    if "openrouter.ai" in _base_url():
+        ref = os.getenv("OPENROUTER_HTTP_REFERER", "").strip()
+        if ref:
+            headers["Referer"] = ref
+        headers["X-Title"] = os.getenv("OPENROUTER_APP_TITLE", "Job Scraper Dashboard")
+    return headers
 
 
 def is_agent_configured() -> bool:
@@ -149,6 +165,144 @@ def list_agents() -> List[Dict[str, Any]]:
     return out
 
 
+def _agent_env_key(agent_id: str) -> str:
+    return f"AGENT_{agent_id.upper().replace('-', '_')}_MODEL"
+
+
+def get_llm_diagnostics() -> Dict[str, Any]:
+    """Provider, API base URL, resolved model per agent + resume-profile agent (no network I/O)."""
+    if not is_agent_configured():
+        return {
+            "configured": False,
+            "provider": None,
+            "base_url": None,
+            "agents": [],
+            "resume_profile": None,
+        }
+    provider = "openrouter" if _using_openrouter() else "openai"
+    agents: List[Dict[str, Any]] = []
+    for spec in _builtin_agents():
+        env_key = _agent_env_key(spec.id)
+        env_val = os.getenv(env_key, "").strip()
+        agents.append(
+            {
+                "id": spec.id,
+                "label": spec.label,
+                "model": _agent_env_model(spec.id),
+                "model_source": "env" if env_val else "default",
+                "env_key": env_key,
+            }
+        )
+    resume_env = os.getenv("AGENT_RESUME_PROFILE_MODEL", "").strip()
+    return {
+        "configured": True,
+        "provider": provider,
+        "base_url": _base_url(),
+        "agents": agents,
+        "resume_profile": {
+            "id": "resume_profile",
+            "label": "Resume → ranker review",
+            "model": _resume_profile_model(),
+            "model_source": "env" if resume_env else "default",
+            "env_key": "AGENT_RESUME_PROFILE_MODEL",
+        },
+    }
+
+
+def test_llm_agent_models() -> Dict[str, Any]:
+    """
+    Run a tiny completion for each job-card agent model plus the resume-profile model.
+    Verifies API key, base URL, and that each model id accepts requests.
+    """
+    if not is_agent_configured():
+        return {
+            "configured": False,
+            "overall_ok": False,
+            "tested_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "results": [],
+            "error": "No OPENROUTER_API_KEY or OPENAI_API_KEY",
+        }
+
+    headers = _llm_headers()
+    results: List[Dict[str, Any]] = []
+
+    def ping_one(name: str, agent_id: str, model: str) -> Dict[str, Any]:
+        t0 = time.perf_counter()
+        try:
+            r = requests.post(
+                _chat_completions_url(),
+                headers=headers,
+                json={
+                    "model": model,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "Reply with exactly the word OK and nothing else.",
+                        },
+                        {"role": "user", "content": "ping"},
+                    ],
+                    "max_tokens": 16,
+                    "temperature": 0,
+                },
+                timeout=75,
+            )
+            elapsed_ms = int((time.perf_counter() - t0) * 1000)
+            if r.status_code != 200:
+                err_body = r.text[:400] if r.text else ""
+                return {
+                    "id": agent_id,
+                    "name": name,
+                    "model": model,
+                    "ok": False,
+                    "latency_ms": elapsed_ms,
+                    "error": f"HTTP {r.status_code}: {err_body}",
+                }
+            data = r.json()
+            content = (
+                (data.get("choices") or [{}])[0]
+                .get("message", {})
+                .get("content", "")
+                or ""
+            )
+            preview = content.strip()[:120]
+            return {
+                "id": agent_id,
+                "name": name,
+                "model": model,
+                "ok": True,
+                "latency_ms": elapsed_ms,
+                "response_preview": preview,
+            }
+        except Exception as e:
+            elapsed_ms = int((time.perf_counter() - t0) * 1000)
+            return {
+                "id": agent_id,
+                "name": name,
+                "model": model,
+                "ok": False,
+                "latency_ms": elapsed_ms,
+                "error": str(e)[:400],
+            }
+
+    for spec in _builtin_agents():
+        results.append(ping_one(spec.label, spec.id, _agent_env_model(spec.id)))
+    results.append(
+        ping_one(
+            "Resume → ranker review",
+            "resume_profile",
+            _resume_profile_model(),
+        )
+    )
+
+    overall_ok = all(x.get("ok") for x in results)
+    return {
+        "configured": True,
+        "overall_ok": overall_ok,
+        "tested_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "results": results,
+    }
+
+
 def _spec_by_id(agent_id: str) -> Optional[AgentSpec]:
     aid = agent_id.strip().lower()
     for s in _builtin_agents():
@@ -198,16 +352,7 @@ def evaluate_job(
         ensure_ascii=False,
     )
 
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json",
-    }
-    # OpenRouter optional attribution (helps with rankings on their side)
-    if "openrouter.ai" in _base_url():
-        ref = os.getenv("OPENROUTER_HTTP_REFERER", "").strip()
-        if ref:
-            headers["Referer"] = ref
-        headers["X-Title"] = os.getenv("OPENROUTER_APP_TITLE", "Job Scraper Dashboard")
+    headers = _llm_headers()
 
     try:
         r = requests.post(
@@ -287,15 +432,7 @@ def review_resume_for_search_profile(resume_text: str) -> Optional[Dict[str, Any
         ensure_ascii=False,
     )
 
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json",
-    }
-    if "openrouter.ai" in _base_url():
-        ref = os.getenv("OPENROUTER_HTTP_REFERER", "").strip()
-        if ref:
-            headers["Referer"] = ref
-        headers["X-Title"] = os.getenv("OPENROUTER_APP_TITLE", "Job Scraper Dashboard")
+    headers = _llm_headers()
 
     resolved_model = _resume_profile_model()
     try:

@@ -37,9 +37,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from job_history import get_jobs_for_date, list_date_summaries, today_iso
 from job_agent import (
     evaluate_job,
+    get_llm_diagnostics,
     is_agent_configured,
     list_agents,
     review_resume_for_search_profile,
+    test_llm_agent_models,
 )
 
 logger = logging.getLogger(__name__)
@@ -195,6 +197,23 @@ def agents_list() -> Dict[str, Any]:
     if not is_agent_configured():
         return {"agents": [], "configured": False}
     return {"agents": list_agents(), "configured": True}
+
+
+@protected.get("/agents/diagnostics")
+def agents_diagnostics() -> Dict[str, Any]:
+    """Resolved provider, base URL, model id per agent (no LLM calls)."""
+    return get_llm_diagnostics()
+
+
+@protected.post("/agents/test-models")
+def agents_test_models() -> Dict[str, Any]:
+    """Tiny completion per model — verifies connectivity (may take ~10–60s)."""
+    if not is_agent_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Set OPENROUTER_API_KEY or OPENAI_API_KEY to test models.",
+        )
+    return test_llm_agent_models()
 
 
 @protected.post("/agent/evaluate")

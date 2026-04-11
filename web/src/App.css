@@ -323,6 +323,136 @@ body {
   min-height: 1.35em;
 }
 
+.llm-agents-panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1rem 1.1rem 1.15rem;
+  margin-bottom: 1.5rem;
+}
+
+.llm-agents-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  margin-bottom: 0.65rem;
+}
+
+.llm-agents-title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.llm-agents-test-btn {
+  font-family: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding: 0.35rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+  background: rgba(91, 141, 239, 0.15);
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.llm-agents-test-btn:hover:not(:disabled) {
+  background: rgba(91, 141, 239, 0.28);
+}
+
+.llm-agents-test-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.llm-agents-muted {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.llm-agents-meta {
+  margin: 0 0 0.65rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+.llm-agents-url {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.78em;
+}
+
+.llm-agents-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+.llm-agents-table th,
+.llm-agents-table td {
+  text-align: left;
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.llm-agents-table th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.llm-agents-table code {
+  font-size: 0.78rem;
+}
+
+.llm-agents-test-msg {
+  margin: 0.65rem 0 0;
+  font-size: 0.85rem;
+}
+
+.llm-agents-test-results {
+  margin-top: 0.75rem;
+  padding-top: 0.65rem;
+  border-top: 1px solid var(--border);
+}
+
+.llm-agents-test-summary {
+  margin: 0 0 0.45rem;
+  font-size: 0.85rem;
+}
+
+.llm-test-ok {
+  color: var(--perfect);
+  font-weight: 600;
+}
+
+.llm-test-bad {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.llm-test-list {
+  margin: 0;
+  padding-left: 1.15rem;
+  font-size: 0.82rem;
+  color: var(--text);
+  line-height: 1.45;
+}
+
+.llm-test-item.ok {
+  color: #b4bcc6;
+}
+
+.llm-test-item.bad {
+  color: var(--danger);
+}
+
 .profile-panel {
   background: var(--surface);
   border: 1px solid var(--border);
