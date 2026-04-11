@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { apiFetch, setToken } from "./api";
+import Login, { fetchAuthStatus, fetchSessionValid } from "./Login";
 
 type JobRow = {
   title: string;
@@ -146,6 +148,8 @@ function parseISODate(s: string): Date {
 }
 
 export default function App() {
+  const [authPhase, setAuthPhase] = useState<"loading" | "login" | "ready">("loading");
+  const [requireLogin, setRequireLogin] = useState(false);
   const [monthCursor, setMonthCursor] = useState(() => startOfMonth(new Date()));
   const [selectedDate, setSelectedDate] = useState(() => isoDate(new Date()));
   const [summaries, setSummaries] = useState<DateSummary[]>([]);
@@ -164,8 +168,6 @@ export default function App() {
     {}
   );
   const [expandedDesc, setExpandedDesc] = useState<Record<string, boolean>>({});
-  const [scrapeNowEnabled, setScrapeNowEnabled] = useState(false);
-  const [scrapeCode, setScrapeCode] = useState("");
   const [scrapeBusy, setScrapeBusy] = useState(false);
   const [scrapeMsg, setScrapeMsg] = useState<string | null>(null);
   const [jobsRefresh, setJobsRefresh] = useState(0);
@@ -179,7 +181,8 @@ export default function App() {
   }, [summaries]);
 
   const loadSummaries = useCallback(async () => {
-    const r = await fetch("/api/dates");
+    const r = await apiFetch("/api/dates");
+    if (r.status === 401) throw new Error("Session expired — sign in again.");
     if (!r.ok) throw new Error("Failed to load calendar data");
     const data = await r.json();
     setSummaries(data.dates ?? []);
@@ -196,7 +199,7 @@ export default function App() {
 
   const loadAgents = useCallback(async () => {
     try {
-      const r = await fetch("/api/agents");
+      const r = await apiFetch("/api/agents");
       if (r.ok) {
         const data = await r.json();
         setAgents(data.agents ?? []);
@@ -206,21 +209,53 @@ export default function App() {
     }
   }, []);
 
-  useEffect(() => {
-    loadHealth();
-    loadAgents();
-    loadSummaries().catch(() => setSummaries([]));
-    fetch("/api/scrape-now/config")
-      .then((r) => r.json())
-      .then((d: { enabled?: boolean }) => setScrapeNowEnabled(!!d.enabled))
-      .catch(() => setScrapeNowEnabled(false));
-  }, [loadSummaries, loadHealth, loadAgents]);
+  const signOut = useCallback(() => {
+    setToken(null);
+    setAuthPhase("loading");
+    void fetchAuthStatus()
+      .then((st) => {
+        if (!st.login_required) setAuthPhase("ready");
+        else setAuthPhase("login");
+      })
+      .catch(() => setAuthPhase("login"));
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
+    (async () => {
+      try {
+        const st = await fetchAuthStatus();
+        if (cancelled) return;
+        setRequireLogin(!!st.login_required);
+        if (!st.login_required) {
+          setAuthPhase("ready");
+          return;
+        }
+        const ok = await fetchSessionValid();
+        if (cancelled) return;
+        setAuthPhase(ok ? "ready" : "login");
+      } catch {
+        if (!cancelled) setAuthPhase("login");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (authPhase !== "ready") return;
+    loadHealth();
+    loadAgents();
+    loadSummaries().catch(() => setSummaries([]));
+  }, [authPhase, loadSummaries, loadHealth, loadAgents]);
+
+  useEffect(() => {
+    if (authPhase !== "ready") return;
+    let cancelled = false;
     setLoading(true);
     setJobsErr(null);
-    fetch(`/api/jobs/${selectedDate}`)
+    apiFetch(`/api/jobs/${selectedDate}`)
       .then(async (r) => {
         if (!r.ok) throw new Error("Could not load jobs for that day");
         return r.json();
@@ -245,16 +280,14 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedDate, jobsRefresh]);
+  }, [selectedDate, jobsRefresh, authPhase]);
 
   async function triggerScrapeNow() {
     setScrapeMsg(null);
     setScrapeBusy(true);
     try {
-      const r = await fetch("/api/scrape-now", {
+      const r = await apiFetch("/api/scrape-now", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code: scrapeCode }),
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) {
@@ -268,7 +301,6 @@ export default function App() {
         throw new Error(msg || r.statusText);
       }
       setScrapeMsg(typeof data.detail === "string" ? data.detail : "Scrape started.");
-      setScrapeCode("");
       window.setTimeout(() => {
         loadSummaries().catch(() => undefined);
         setJobsRefresh((x) => x + 1);
@@ -315,7 +347,7 @@ export default function App() {
     const busyKey = `${jobKey}::${agentId}`;
     setAgentBusy(busyKey);
     try {
-      const r = await fetch("/api/agent/evaluate", {
+      const r = await apiFetch("/api/agent/evaluate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -364,6 +396,18 @@ export default function App() {
 
   const todayIso = isoDate(new Date());
 
+  if (authPhase === "loading") {
+    return (
+      <div className="login-screen">
+        <p className="login-lead">Loading…</p>
+      </div>
+    );
+  }
+
+  if (authPhase === "login") {
+    return <Login onLoggedIn={() => setAuthPhase("ready")} />;
+  }
+
   return (
     <div>
       <header className="app-header">
@@ -378,21 +422,16 @@ export default function App() {
               (JobRanker).
             </p>
           </div>
-          {scrapeNowEnabled && (
-            <div className="scrape-now">
-              <input
-                type="password"
-                name="scrape-code"
-                autoComplete="off"
-                placeholder="Scrape code"
-                value={scrapeCode}
-                onChange={(e) => setScrapeCode(e.target.value)}
-              />
-              <button type="button" disabled={scrapeBusy} onClick={() => void triggerScrapeNow()}>
-                {scrapeBusy ? "Starting…" : "Scrape now"}
+          <div className="scrape-now">
+            {requireLogin && (
+              <button type="button" className="sign-out-btn" onClick={signOut}>
+                Sign out
               </button>
-            </div>
-          )}
+            )}
+            <button type="button" disabled={scrapeBusy} onClick={() => void triggerScrapeNow()}>
+              {scrapeBusy ? "Starting…" : "Scrape now"}
+            </button>
+          </div>
         </div>
         {scrapeMsg && <p className="scrape-msg">{scrapeMsg}</p>}
       </header>
@@ -481,12 +520,8 @@ export default function App() {
           {!loading && !jobsErr && jobs.length === 0 && (
             <p className="empty">
               No jobs stored for this day yet. History is written when the scraper finds{" "}
-              <strong>new</strong> listings
-              {scrapeNowEnabled
-                ? " (use Scrape now above, or wait for the scheduled run)."
-                : " (scheduled run or CLI: python main.py --once)."}
-              {" "}
-              Days before this change have no archive.
+              <strong>new</strong> listings (use <strong>Scrape now</strong> above, or wait for the
+              scheduled run). Days before this change have no archive.
             </p>
           )}
 
