@@ -216,6 +216,15 @@ def agents_test_models() -> Dict[str, Any]:
     return test_llm_agent_models()
 
 
+@protected.get("/sources")
+def scrape_sources_list() -> Dict[str, Any]:
+    """Job boards / sites registered in main.py (same order as concurrent scrape)."""
+    from main import get_scrape_sources_metadata
+
+    rows = get_scrape_sources_metadata()
+    return {"sources": rows, "count": len(rows)}
+
+
 @protected.post("/agent/evaluate")
 def agent_evaluate(body: AgentBody) -> Dict[str, Any]:
     if not is_agent_configured():

@@ -31,6 +31,140 @@ body {
   padding: 1.5rem 1.25rem 3rem;
 }
 
+.app-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.75rem;
+  margin: 0.5rem 0 0.65rem;
+}
+
+.app-nav a {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--muted);
+  text-decoration: none;
+  padding: 0.2rem 0.15rem;
+  border-bottom: 2px solid transparent;
+}
+
+.app-nav a:hover {
+  color: var(--text);
+}
+
+.app-nav a.active,
+.app-nav span.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.app-nav span.active {
+  font-size: 0.88rem;
+  font-weight: 600;
+  padding: 0.2rem 0.15rem;
+  border-bottom: 2px solid var(--accent);
+}
+
+.app-nav button.app-nav-settings-btn {
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--muted);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 0.2rem 0.15rem;
+  cursor: pointer;
+}
+
+.app-nav button.app-nav-settings-btn:hover {
+  color: var(--text);
+}
+
+.header-route-hint {
+  margin: 0.35rem 0 0;
+  font-size: 0.9rem;
+  color: var(--muted);
+  max-width: 36rem;
+}
+
+.settings-page {
+  margin-bottom: 1.5rem;
+}
+
+.settings-page-lead {
+  margin: 0 0 1rem;
+  font-size: 0.9rem;
+  color: var(--muted);
+  max-width: 42rem;
+}
+
+.settings-section {
+  margin-bottom: 1.25rem;
+}
+
+.settings-section-title {
+  margin: 0 0 0.65rem;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.settings-section .dashboard-status {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
+.sources-panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1rem 1.1rem 1.15rem;
+}
+
+.sources-lead {
+  margin: 0 0 0.65rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+  max-width: 48rem;
+}
+
+.sources-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+.sources-table th,
+.sources-table td {
+  text-align: left;
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.sources-table th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.sources-link {
+  color: var(--accent);
+  word-break: break-all;
+  font-size: 0.78rem;
+}
+
+.llm-agents-head {
+  justify-content: flex-end;
+}
+
+.llm-agents-head-spacer {
+  flex: 1;
+  min-width: 0;
+}
+
 .app-header {
   margin-bottom: 1.75rem;
 }

@@ -18,7 +18,7 @@ import asyncio
 import random
 import argparse
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Set, Tuple
+from typing import Any, List, Dict, Optional, Set, Tuple
 from dataclasses import dataclass, asdict
 from enum import Enum
 from urllib.parse import urlparse, urlunparse, parse_qs
@@ -3515,32 +3515,49 @@ async def _scrape_single(scraper: JobScraper) -> List[Job]:
         return []
 
 
+# Same order as scrape_all_jobs() — used by get_scrape_sources_metadata() for the dashboard.
+SCRAPER_SPECS: List[Tuple[str, Any]] = [
+    ("crypto", Web3CareerScraper),
+    ("crypto", CryptoJobsListScraper),
+    ("crypto", CryptocurrencyJobsScraper),
+    ("crypto", CryptoJobsScraper),
+    ("crypto", FindCryptoJobsScraper),
+    ("crypto", BondexScraper),
+    ("crypto", RemoteOKScraper),
+    ("crypto", WellfoundScraper),
+    ("crypto", SolanaJobsScraper),
+    ("crypto", DelphiVenturesScraper),
+    ("crypto", TelegramScraper),
+    ("cruise", CarnivalShipJobsScraper),
+    ("cruise", AllCruiseJobsScraper),
+    ("cruise", SelectionPartnersScraper),
+    ("cruise", PeopleConquestScraper),
+    ("cruise", DouroAzulScraper),
+    ("general", WeWorkRemotelyScraper),
+    ("general", JobicyScraper),
+    ("general", RemoteOKGeneralScraper),
+]
+
+
+def get_scrape_sources_metadata() -> List[Dict[str, Any]]:
+    """Human-readable source names and base URLs for the dashboard (mirrors SCRAPER_SPECS)."""
+    out: List[Dict[str, Any]] = []
+    for category, cls in SCRAPER_SPECS:
+        inst = cls()
+        base = getattr(inst, "base_url", None) or getattr(inst, "search_url", None) or ""
+        out.append(
+            {
+                "category": category,
+                "name": inst.source_name,
+                "base_url": base,
+            }
+        )
+    return out
+
+
 async def scrape_all_jobs() -> List[Job]:
     """Scrape all job sources concurrently for maximum speed"""
-    scrapers = [
-        # Crypto / Web3
-        Web3CareerScraper(),
-        CryptoJobsListScraper(),
-        CryptocurrencyJobsScraper(),
-        CryptoJobsScraper(),
-        FindCryptoJobsScraper(),
-        BondexScraper(),
-        RemoteOKScraper(),
-        WellfoundScraper(),
-        SolanaJobsScraper(),
-        DelphiVenturesScraper(),
-        TelegramScraper(),
-        # Cruise / Maritime IT
-        CarnivalShipJobsScraper(),
-        AllCruiseJobsScraper(),
-        SelectionPartnersScraper(),
-        PeopleConquestScraper(),
-        DouroAzulScraper(),
-        # General / Remote
-        WeWorkRemotelyScraper(),
-        JobicyScraper(),
-        RemoteOKGeneralScraper(),
-    ]
+    scrapers = [cls() for _, cls in SCRAPER_SPECS]
 
     # Run all scrapers concurrently (massive speed improvement)
     # Each scraper has its own error handling so one failure won't affect others

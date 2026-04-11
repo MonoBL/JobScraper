@@ -1,6 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { apiFetch, setToken } from "./api";
 import Login, { fetchAuthStatus, fetchSessionValid } from "./Login";
+import { SettingsPage } from "./SettingsPage";
+
+export type AppProps = {
+  initialView?: "dashboard" | "settings";
+};
+
+/** Opens the dedicated settings HTML page in a new tab (separate document). */
+function openSettingsInNewTab() {
+  const base = import.meta.env.BASE_URL.replace(/\/?$/, "/");
+  const url = new URL(`${base}settings.html`, window.location.origin).href;
+  window.open(url, "_blank", "noopener,noreferrer");
+}
 
 type JobRow = {
   title: string;
@@ -169,7 +181,8 @@ function parseISODate(s: string): Date {
   return new Date(y, m - 1, d);
 }
 
-export default function App() {
+export default function App({ initialView = "dashboard" }: AppProps) {
+  const route = initialView;
   const [authPhase, setAuthPhase] = useState<"loading" | "login" | "ready">("loading");
   const [requireLogin, setRequireLogin] = useState(false);
   const [monthCursor, setMonthCursor] = useState(() => startOfMonth(new Date()));
@@ -241,6 +254,9 @@ export default function App() {
     error?: string;
   } | null>(null);
   const [agentTestLoading, setAgentTestLoading] = useState(false);
+  const [scrapeSources, setScrapeSources] = useState<
+    Array<{ category: string; name: string; base_url: string }> | null
+  >(null);
   const [agents, setAgents] = useState<AgentMeta[]>([]);
   const [agentBusy, setAgentBusy] = useState<string | null>(null);
   const [agentResults, setAgentResults] = useState<Record<string, Record<string, AgentResultEntry>>>(
@@ -321,6 +337,7 @@ export default function App() {
         });
         setDiscordNotificationsEnabled(null);
         setAgentDiagnostics(null);
+        setScrapeSources(null);
         setStatusCheckedAt(new Date());
         return;
       }
@@ -353,6 +370,7 @@ export default function App() {
       });
       setDiscordNotificationsEnabled(null);
       setAgentDiagnostics(null);
+      setScrapeSources(null);
       setStatusCheckedAt(new Date());
       return;
     }
@@ -360,7 +378,7 @@ export default function App() {
     const llmOk = healthJson?.agent === true;
     hint("llm", llmOk ? "API key set — agents enabled" : "No OPENROUTER_API_KEY / OPENAI_API_KEY");
 
-    const [agentsR, datesR, schedR, profR, sessR, notifR, diagR] = await Promise.all([
+    const [agentsR, datesR, schedR, profR, sessR, notifR, diagR, sourcesR] = await Promise.all([
       apiFetch("/api/agents"),
       apiFetch("/api/dates"),
       apiFetch("/api/schedule"),
@@ -368,6 +386,7 @@ export default function App() {
       requireLogin ? apiFetch("/api/auth/session") : Promise.resolve(null as Response | null),
       apiFetch("/api/settings/notifications"),
       apiFetch("/api/agents/diagnostics"),
+      apiFetch("/api/sources"),
     ]);
 
     if (agentsR.ok) {
@@ -446,6 +465,19 @@ export default function App() {
       }
     } else {
       setAgentDiagnostics(null);
+    }
+
+    if (sourcesR.ok) {
+      try {
+        const src = (await sourcesR.json()) as {
+          sources?: Array<{ category: string; name: string; base_url: string }>;
+        };
+        setScrapeSources(src.sources ?? []);
+      } catch {
+        setScrapeSources(null);
+      }
+    } else {
+      setScrapeSources(null);
     }
 
     setDashStatus({
@@ -895,20 +927,53 @@ export default function App() {
         <div className="app-header-top">
           <div>
             <h1>Job Scraper</h1>
-            <p>
-              Today’s matches and past days on the calendar. Ranking fixes live in{" "}
-              <code style={{ fontFamily: "JetBrains Mono, monospace", fontSize: "0.88em" }}>
-                main.py
-              </code>{" "}
-              (JobRanker).
-            </p>
-            <p className="schedule-hint">
-              Next automatic scrape in{" "}
-              <strong>{scheduleLoaded ? formatCountdown(countdownSec) : "…"}</strong>
-              {" · "}
-              scheduled at <strong>{scheduleTimeLabel}</strong> (server time,{" "}
-              <code className="schedule-env">SCRAPE_SCHEDULE_TIME</code>)
-            </p>
+            <nav className="app-nav" aria-label="Main pages">
+              {route === "dashboard" ? (
+                <>
+                  <span className="active" aria-current="page">
+                    Jobs
+                  </span>
+                  <button
+                    type="button"
+                    className="app-nav-settings-btn"
+                    title="Opens settings in a new browser tab"
+                    onClick={openSettingsInNewTab}
+                  >
+                    Settings
+                  </button>
+                </>
+              ) : (
+                <>
+                  <a href={import.meta.env.BASE_URL}>Jobs</a>
+                  <span className="active" aria-current="page">
+                    Settings
+                  </span>
+                </>
+              )}
+            </nav>
+            {route === "dashboard" ? (
+              <>
+                <p>
+                  Today’s matches and past days on the calendar. Ranking fixes live in{" "}
+                  <code style={{ fontFamily: "JetBrains Mono, monospace", fontSize: "0.88em" }}>
+                    main.py
+                  </code>{" "}
+                  (JobRanker).
+                </p>
+                <p className="schedule-hint">
+                  Next automatic scrape in{" "}
+                  <strong>{scheduleLoaded ? formatCountdown(countdownSec) : "…"}</strong>
+                  {" · "}
+                  scheduled at <strong>{scheduleTimeLabel}</strong> (server time,{" "}
+                  <code className="schedule-env">SCRAPE_SCHEDULE_TIME</code>)
+                </p>
+              </>
+            ) : (
+              <p className="header-route-hint">
+                LLM models, resume ranker, notifications, Discord, and the list of scraped sites. Use{" "}
+                <strong>Jobs</strong> above to return to the calendar.
+              </p>
+            )}
           </div>
           <div className="scrape-now">
             {requireLogin && (
@@ -921,267 +986,47 @@ export default function App() {
             </button>
           </div>
         </div>
-        <div
-          className="dashboard-status"
-          role="region"
-          aria-label="Service status"
-          aria-live="polite"
-        >
-          <div className="dashboard-status-inner">
-            <span className="dashboard-status-title">System status</span>
-            {(
-              [
-                ["api", "API"],
-                ["llm", "LLM"],
-                ["jobs", "Jobs"],
-                ["schedule", "Schedule"],
-                ["profile", "Profile"],
-                ["auth", "Login"],
-              ] as const
-            ).map(([key, label]) => (
-              <span
-                key={key}
-                className={`status-pill status-pill--${dashStatus[key]}`}
-                title={statusHints[key] ?? label}
-              >
-                <span className="status-pill-dot" aria-hidden />
-                {label}
-              </span>
-            ))}
-            <button
-              type="button"
-              className="status-refresh-btn"
-              onClick={() => void refreshDashboardStatus()}
-            >
-              Refresh status
-            </button>
-            <button
-              type="button"
-              className="status-hard-refresh-btn"
-              title="Reload the entire dashboard (full page reload)"
-              onClick={() => window.location.reload()}
-            >
-              Hard refresh
-            </button>
-            <label
-              className="discord-toggle"
-              title="When off, scrapes still run but no messages are sent to Discord (saved in data/app_settings.json on the server)."
-            >
-              <input
-                type="checkbox"
-                role="switch"
-                checked={discordNotificationsEnabled === true}
-                disabled={discordNotificationsEnabled === null || discordToggleSaving}
-                onChange={(e) => void saveDiscordNotifications(e.target.checked)}
-              />
-              <span className="discord-toggle-text">Discord messages</span>
-            </label>
-            {statusCheckedAt ? (
-              <time className="status-checked-at" dateTime={statusCheckedAt.toISOString()}>
-                Checked {statusCheckedAt.toLocaleTimeString()}
-              </time>
-            ) : null}
-          </div>
-        </div>
-        {scrapePolling && (
+        {route === "dashboard" && scrapePolling && (
           <div className="scrape-progress" aria-busy="true">
             <div className="scrape-progress-bar indeterminate" />
             <p className="scrape-progress-label">{scrapePhaseText}</p>
           </div>
         )}
-        {scrapeMsg && !scrapePolling && <p className="scrape-msg">{scrapeMsg}</p>}
-        {scrapeMsg && scrapePolling && (
+        {route === "dashboard" && scrapeMsg && !scrapePolling && <p className="scrape-msg">{scrapeMsg}</p>}
+        {route === "dashboard" && scrapeMsg && scrapePolling && (
           <p className="scrape-msg scrape-msg-muted">{scrapeMsg}</p>
         )}
       </header>
 
-      <section className="llm-agents-panel" aria-label="LLM models and connectivity">
-        <div className="llm-agents-head">
-          <h3 className="llm-agents-title">LLM agents &amp; models</h3>
-          <button
-            type="button"
-            className="llm-agents-test-btn"
-            disabled={llmDisabled || agentTestLoading}
-            title={
-              llmDisabled
-                ? "Set OPENROUTER_API_KEY or OPENAI_API_KEY on the server"
-                : "Send a tiny ping to each model (can take ~15–60s)"
-            }
-            onClick={() => void runAgentModelTests()}
-          >
-            {agentTestLoading ? "Testing…" : "Test models"}
-          </button>
-        </div>
-        {!agentDiagnostics?.configured && (
-          <p className="llm-agents-muted">Set an API key to see resolved models and run connectivity tests.</p>
-        )}
-        {agentDiagnostics?.configured && (
-          <>
-            <p className="llm-agents-meta">
-              Provider <code className="schedule-env">{agentDiagnostics.provider}</code> · API{" "}
-              <code className="llm-agents-url">{agentDiagnostics.base_url}</code>
-            </p>
-            <table className="llm-agents-table">
-              <thead>
-                <tr>
-                  <th>Agent</th>
-                  <th>Model</th>
-                  <th>Source</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(agentDiagnostics.agents ?? []).map((a) => (
-                  <tr key={a.id}>
-                    <td>{a.label}</td>
-                    <td>
-                      <code>{a.model}</code>
-                    </td>
-                    <td>
-                      {a.model_source === "env" ? (
-                        <>
-                          env (<code className="schedule-env">{a.env_key}</code>)
-                        </>
-                      ) : (
-                        "default"
-                      )}
-                    </td>
-                  </tr>
-                ))}
-                {agentDiagnostics.resume_profile ? (
-                  <tr>
-                    <td>{agentDiagnostics.resume_profile.label}</td>
-                    <td>
-                      <code>{agentDiagnostics.resume_profile.model}</code>
-                    </td>
-                    <td>
-                      {agentDiagnostics.resume_profile.model_source === "env" ? (
-                        <>
-                          env (
-                          <code className="schedule-env">{agentDiagnostics.resume_profile.env_key}</code>)
-                        </>
-                      ) : (
-                        "default"
-                      )}
-                    </td>
-                  </tr>
-                ) : null}
-              </tbody>
-            </table>
-          </>
-        )}
-        {agentTestResults?.error ? (
-          <p className="err llm-agents-test-msg">{agentTestResults.error}</p>
-        ) : null}
-        {agentTestResults?.results && agentTestResults.results.length > 0 ? (
-          <div className="llm-agents-test-results">
-            <p className="llm-agents-test-summary">
-              {agentTestResults.overall_ok ? (
-                <span className="llm-test-ok">All model checks passed.</span>
-              ) : (
-                <span className="llm-test-bad">Some model checks failed.</span>
-              )}
-              {agentTestResults.tested_at ? (
-                <span className="llm-agents-muted"> {agentTestResults.tested_at}</span>
-              ) : null}
-            </p>
-            <ul className="llm-test-list">
-              {agentTestResults.results.map((r) => (
-                <li key={r.id} className={r.ok ? "llm-test-item ok" : "llm-test-item bad"}>
-                  <strong>{r.name}</strong> — <code>{r.model}</code>
-                  {r.ok ? (
-                    <>
-                      {" "}
-                      · OK ({r.latency_ms ?? "?"} ms)
-                      {r.response_preview ? ` · «${r.response_preview}»` : ""}
-                    </>
-                  ) : (
-                    <>
-                      {" "}
-                      · <span className="err">{r.error ?? "Failed"}</span>
-                    </>
-                  )}
-                </li>
-              ))}
-            </ul>
-          </div>
-        ) : null}
-      </section>
+      {route === "settings" ? (
+        <SettingsPage
+          dashStatus={dashStatus}
+          statusHints={statusHints}
+          statusCheckedAt={statusCheckedAt}
+          refreshDashboardStatus={refreshDashboardStatus}
+          discordNotificationsEnabled={discordNotificationsEnabled}
+          discordToggleSaving={discordToggleSaving}
+          saveDiscordNotifications={saveDiscordNotifications}
+          llmDisabled={llmDisabled}
+          agentDiagnostics={agentDiagnostics}
+          agentTestResults={agentTestResults}
+          agentTestLoading={agentTestLoading}
+          runAgentModelTests={runAgentModelTests}
+          profile={profile}
+          profileMsg={profileMsg}
+          resumeFileRef={resumeFileRef}
+          resumeFileName={resumeFileName}
+          setResumeFileName={setResumeFileName}
+          uploadResumeFile={uploadResumeFile}
+          reviewResumeProfile={reviewResumeProfile}
+          clearRankerOverrides={clearRankerOverrides}
+          resumeUploading={resumeUploading}
+          reviewBusy={reviewBusy}
+          scrapeSources={scrapeSources}
+        />
+      ) : null}
 
-      <section className="profile-panel" aria-label="Resume and search profile">
-        <h3 className="profile-heading">Resume &amp; search ranking</h3>
-        <p className="profile-lead">
-          Upload your CV as PDF. An LLM compares it to the built-in JobRanker lists in{" "}
-          <code className="schedule-env">main.py</code> and saves <strong>additional</strong> title and
-          keyword phrases to{" "}
-          <code className="schedule-env">data/ranker_overrides.json</code>. The next scrape uses those
-          extras so matches align better with your background. After upload, run{" "}
-          <strong>Update ranker from resume</strong> — until then, “Extra phrases” stays none.
-        </p>
-        <div className="profile-row">
-          <div className="profile-file-picker">
-            <input
-              ref={resumeFileRef}
-              id="resume-pdf-input"
-              type="file"
-              accept="application/pdf,.pdf"
-              className="profile-file-input"
-              onChange={(e) => setResumeFileName(e.target.files?.[0]?.name ?? null)}
-            />
-            <label htmlFor="resume-pdf-input" className="profile-file-label">
-              Choose PDF
-            </label>
-            <span className="profile-file-name" title={resumeFileName ?? undefined}>
-              {resumeFileName ?? "No file chosen"}
-            </span>
-          </div>
-          <button
-            type="button"
-            className="profile-btn-secondary"
-            disabled={resumeUploading}
-            onClick={() => void uploadResumeFile()}
-          >
-            {resumeUploading ? "Uploading…" : "Upload PDF"}
-          </button>
-          <button
-            type="button"
-            className="profile-review-btn"
-            disabled={reviewBusy || !profile?.has_resume || llmDisabled}
-            onClick={() => void reviewResumeProfile()}
-          >
-            {reviewBusy ? "Updating ranker…" : "Update ranker from resume"}
-          </button>
-          <button
-            type="button"
-            className="profile-btn-secondary"
-            onClick={() => void clearRankerOverrides()}
-          >
-            Clear overrides
-          </button>
-        </div>
-        {llmDisabled && (
-          <p className="profile-hint">Set OPENROUTER_API_KEY or OPENAI_API_KEY to run resume review.</p>
-        )}
-        {profile && (
-          <p className="profile-meta">
-            Resume: {profile.has_resume ? `${profile.resume_chars} characters stored` : "none"} · Extra
-            phrases:{" "}
-            {(profile.override_counts?.perfect_titles ?? 0) +
-              (profile.override_counts?.good_titles ?? 0) +
-              (profile.override_counts?.good_keywords ?? 0) >
-            0
-              ? `${profile.override_counts.perfect_titles} perfect titles, ${profile.override_counts.good_titles} good titles, ${profile.override_counts.good_keywords} keywords`
-              : "none"}
-            {profile.overrides_updated_at ? ` · updated ${profile.overrides_updated_at}` : ""}
-          </p>
-        )}
-        {profile?.last_summary ? (
-          <p className="profile-summary">
-            <strong>Last review:</strong> {profile.last_summary}
-          </p>
-        ) : null}
-        {profileMsg ? <p className="profile-msg">{profileMsg}</p> : null}
-      </section>
-
+      {route === "dashboard" ? (
       <div className="layout">
         <div className="panel">
           <h2>Calendar</h2>
@@ -1370,6 +1215,7 @@ export default function App() {
           })}
         </div>
       </div>
+      ) : null}
     </div>
   );
 }
