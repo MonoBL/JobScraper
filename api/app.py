@@ -382,6 +382,32 @@ def profile_review_resume() -> Dict[str, Any]:
     return {"ok": True, "summary": summary, "preview": preview}
 
 
+@protected.post("/profile/review-feedback")
+def profile_review_feedback() -> Dict[str, Any]:
+    from ranker_profile import apply_llm_overrides
+    from job_agent import review_feedback_for_search_profile
+
+    if not is_agent_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Set OPENROUTER_API_KEY or OPENAI_API_KEY to run feedback review.",
+        )
+    patch = review_feedback_for_search_profile()
+    if patch is None:
+        raise HTTPException(
+            status_code=502,
+            detail="Feedback review failed (no liked jobs, LLM error, or invalid JSON).",
+        )
+    summary = str(patch.get("summary") or "")
+    apply_llm_overrides(patch, summary=summary)
+    preview = {
+        "perfect_titles_add": patch.get("perfect_titles_add"),
+        "good_titles_add": patch.get("good_titles_add"),
+        "notes_for_search": patch.get("notes_for_search"),
+    }
+    return {"ok": True, "summary": summary, "preview": preview}
+
+
 @protected.delete("/profile/overrides")
 def profile_clear_overrides() -> Dict[str, Any]:
     from ranker_profile import clear_overrides_file
@@ -394,7 +420,7 @@ class FeedbackBody(BaseModel):
     url: str = Field(..., min_length=1)
     title: str = ""
     company: str = ""
-    feedback: str = Field(..., pattern="^(good|bad)$")
+    feedback: str = Field(..., pattern="^(good|bad|none)$")
 
 
 @protected.post("/feedback")

@@ -320,15 +320,19 @@ def evaluate_job(
     resolved_model = model_override or _agent_env_model(spec.id)
     snippet = (description or "")[:6000]
 
-    user = json.dumps(
-        {
-            "task": f"Follow your role and output JSON matching this shape: {spec.response_hint}",
-            "title": title,
-            "company": company,
-            "description_excerpt": snippet,
-        },
-        ensure_ascii=False,
-    )
+    from feedback_store import list_feedback
+    liked_roles = [f"{f.get('title', 'Unknown')} at {f.get('company', 'Unknown')}" for f in list_feedback() if f.get('feedback') == 'good']
+
+    user_payload: Dict[str, Any] = {
+        "task": f"Follow your role and output JSON matching this shape: {spec.response_hint}",
+        "title": title,
+        "company": company,
+        "description_excerpt": snippet,
+    }
+    if liked_roles:
+        user_payload["examples_of_user_liked_roles"] = liked_roles[:20]
+
+    user = json.dumps(user_payload, ensure_ascii=False)
 
     headers = _llm_headers()
     payload = {
@@ -508,4 +512,80 @@ def review_resume_for_search_profile(resume_text: str) -> Optional[Dict[str, Any
         return _parse_json_response(raw)
     except Exception as e:
         logger.warning("Resume profile review failed: %s", e)
+        return None
+
+
+def review_feedback_for_search_profile() -> Optional[Dict[str, Any]]:
+    """
+    Review liked jobs ("good" feedback) to extract new JobRanker baselines.
+    Returns JSON with *_add lists to merge into ranker_overrides.json.
+    """
+    key = _api_key()
+    if not key:
+        return None
+
+    from feedback_store import list_feedback
+    from ranker_profile import baseline_for_llm
+
+    liked_jobs = [f for f in list_feedback() if f.get("feedback") == "good"]
+    if not liked_jobs:
+        return None
+
+    titles_companies = [f"- {j.get('title', 'Unknown')} (at {j.get('company', 'Unknown')})" for j in liked_jobs]
+    roles_text = "\n".join(titles_companies[:50]) # Limit to 50 recent likes to avoid massive context
+
+    baseline = baseline_for_llm()
+    system = (
+        "You align candidate preferences with an automated job-ranking system used by a Python scraper. "
+        "Jobs are scored using substring matches on job title and description against phrase lists "
+        "(perfect/good titles, keyword groups, optional blacklist title phrases). "
+        "The user has EXPLICITLY LIKED the provided list of roles. "
+        "Suggest ONLY concise phrases to ADD to the scraper's baseline rules to find similar jobs — "
+        "lowercase where possible, 2–8 words for titles. "
+        "Do not duplicate items already listed in baseline_rules. "
+        "Derive suggestions from the patterns in the liked roles: technologies, role titles, domains. "
+        "For blacklist_*_add, only add job TITLE phrases the user should not be matched to. "
+        "Cruise fields apply to ship/maritime IT jobs only. "
+        "Respond ONLY with valid JSON, no markdown or code fences."
+    )
+    hint = (
+        '{"summary":"one paragraph summarizing what patterns were found in the liked roles and what is being added","perfect_titles_add":[],"good_titles_add":[],'
+        '"perfect_keywords_add":{"linux":[],"scripting":[],"infrastructure":[],"automation":[]},'
+        '"good_keywords_add":[],"strong_title_phrases_add":[],"blacklist_titles_add":[],"blacklist_keywords_title_add":[],'
+        '"cruise_perfect_titles_add":[],"cruise_good_titles_add":[],"cruise_it_keywords_add":[],'
+        '"notes_for_search":"short technical note based on liked roles"}'
+    )
+    user = json.dumps(
+        {
+            "task": f"Output JSON matching this shape exactly: {hint}",
+            "baseline_rules": baseline,
+            "liked_roles": roles_text,
+        },
+        ensure_ascii=False,
+    )
+
+    headers = _llm_headers()
+
+    resolved_model = _resume_profile_model()
+    try:
+        r = requests.post(
+            _chat_completions_url(),
+            headers=headers,
+            json={
+                "model": resolved_model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "temperature": 0.15,
+                "max_tokens": 2500,
+            },
+            timeout=120,
+        )
+        r.raise_for_status()
+        data = r.json()
+        raw = data["choices"][0]["message"]["content"].strip()
+        return _parse_json_response(raw)
+    except Exception as e:
+        logger.warning("Feedback profile review failed: %s", e)
         return None

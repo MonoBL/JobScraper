@@ -51,9 +51,17 @@ def _save(entries: List[Dict[str, Any]]) -> None:
 
 
 def upsert_feedback(url: str, title: str, company: str, feedback: str) -> Dict[str, Any]:
-    """Save or update feedback for a job URL. feedback = 'good' | 'bad'."""
+    """Save or update feedback for a job URL. feedback = 'good' | 'bad' | 'none'."""
     entries = _load()
     now = datetime.now().strftime("%Y-%m-%d")
+    
+    if feedback == "none":
+        original_len = len(entries)
+        entries = [e for e in entries if e.get("url") != url]
+        if len(entries) != original_len:
+            _save(entries)
+        return {"url": url, "feedback": "none"}
+
     for e in entries:
         if e.get("url") == url:
             e["feedback"] = feedback

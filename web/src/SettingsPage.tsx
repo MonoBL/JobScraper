@@ -66,6 +66,7 @@ export type SettingsPageProps = {
   setResumeFileName: (name: string | null) => void;
   uploadResumeFile: () => Promise<void>;
   reviewResumeProfile: () => Promise<void>;
+  reviewFeedbackProfile: () => Promise<void>;
   clearRankerOverrides: () => Promise<void>;
   resumeUploading: boolean;
   reviewBusy: boolean;
@@ -99,6 +100,7 @@ export function SettingsPage(props: SettingsPageProps) {
     setResumeFileName,
     uploadResumeFile,
     reviewResumeProfile,
+    reviewFeedbackProfile,
     clearRankerOverrides,
     resumeUploading,
     reviewBusy,
@@ -369,6 +371,14 @@ export function SettingsPage(props: SettingsPageProps) {
             onClick={() => void reviewResumeProfile()}
           >
             {reviewBusy ? "Updating ranker…" : "Update ranker from resume"}
+          </button>
+          <button
+            type="button"
+            className="profile-review-btn"
+            disabled={reviewBusy || llmDisabled}
+            onClick={() => void reviewFeedbackProfile()}
+          >
+            {reviewBusy ? "Updating ranker…" : "Update ranker from Liked Jobs"}
           </button>
           <button type="button" className="profile-btn-secondary" onClick={() => void clearRankerOverrides()}>
             Clear overrides

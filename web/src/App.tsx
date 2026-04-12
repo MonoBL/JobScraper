@@ -832,6 +832,26 @@ export default function App({ initialView = "dashboard" }: AppProps) {
     }
   }
 
+  async function reviewFeedbackProfile() {
+    setReviewBusy(true);
+    setProfileMsg(null);
+    try {
+      const r = await apiFetch("/api/profile/review-feedback", { method: "POST" });
+      const data = (await r.json().catch(() => ({}))) as { detail?: string; summary?: string };
+      if (!r.ok) {
+        const det = data.detail;
+        const msg = typeof det === "string" ? det : r.statusText;
+        throw new Error(msg || r.statusText);
+      }
+      setProfileMsg(data.summary || "Ranker overrides updated from liked jobs.");
+      await loadProfile();
+    } catch (e: unknown) {
+      setProfileMsg(e instanceof Error ? e.message : "Review failed");
+    } finally {
+      setReviewBusy(false);
+    }
+  }
+
   async function clearRankerOverrides() {
     if (
       !window.confirm(
@@ -978,9 +998,17 @@ export default function App({ initialView = "dashboard" }: AppProps) {
     }
   }
 
-  async function saveFeedback(job: JobRow, value: "good" | "bad") {
+  async function saveFeedback(job: JobRow, value: "good" | "bad" | "none") {
     const url = job.url;
-    setFeedback((prev) => ({ ...prev, [url]: value }));
+    setFeedback((prev) => {
+      const next = { ...prev };
+      if (value === "none") {
+        delete next[url];
+      } else {
+        next[url] = value;
+      }
+      return next;
+    });
     try {
       await apiFetch("/api/feedback", {
         method: "POST",
@@ -1178,6 +1206,7 @@ export default function App({ initialView = "dashboard" }: AppProps) {
           setResumeFileName={setResumeFileName}
           uploadResumeFile={uploadResumeFile}
           reviewResumeProfile={reviewResumeProfile}
+          reviewFeedbackProfile={reviewFeedbackProfile}
           clearRankerOverrides={clearRankerOverrides}
           resumeUploading={resumeUploading}
           reviewBusy={reviewBusy}
@@ -1348,13 +1377,13 @@ export default function App({ initialView = "dashboard" }: AppProps) {
                       type="button"
                       className={`fb-btn${feedback[job.url] === "good" ? " fb-good active" : " fb-good"}`}
                       title="Good match"
-                      onClick={() => saveFeedback(job, feedback[job.url] === "good" ? "bad" : "good")}
+                      onClick={() => saveFeedback(job, feedback[job.url] === "good" ? "none" : "good")}
                     >👍</button>
                     <button
                       type="button"
                       className={`fb-btn${feedback[job.url] === "bad" ? " fb-bad active" : " fb-bad"}`}
                       title="Not interested"
-                      onClick={() => saveFeedback(job, feedback[job.url] === "bad" ? "good" : "bad")}
+                      onClick={() => saveFeedback(job, feedback[job.url] === "bad" ? "none" : "bad")}
                     >👎</button>
                   </div>
                 </div>
