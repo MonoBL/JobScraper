@@ -1087,7 +1087,19 @@ export default function App({ initialView = "dashboard" }: AppProps) {
       <header className="app-header">
         <div className="app-header-top">
           <div>
-            <h1>Job Scraper</h1>
+            <h1 style={{ display: "flex", alignItems: "baseline", gap: "0.5rem" }}>
+              Job Scraper
+              <span 
+                title={`Build time: ${__APP_BUILD_TIME__}`}
+                style={{ 
+                  fontSize: "0.45em", 
+                  color: "var(--muted, #888)", 
+                  fontWeight: "normal" 
+                }}
+              >
+                v3.0 (built {new Date(__APP_BUILD_TIME__).toLocaleDateString()} {new Date(__APP_BUILD_TIME__).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})})
+              </span>
+            </h1>
             <nav className="app-nav" aria-label="Main pages">
               {route === "dashboard" ? (
                 <>
