@@ -331,47 +331,66 @@ def evaluate_job(
     )
 
     headers = _llm_headers()
+    payload = {
+        "model": resolved_model,
+        "messages": [
+            {"role": "system", "content": spec.system_prompt},
+            {"role": "user", "content": user},
+        ],
+        "temperature": 0.3,
+        "max_tokens": 600,
+    }
 
-    try:
-        r = requests.post(
-            _chat_completions_url(),
-            headers=headers,
-            json={
-                "model": resolved_model,
-                "messages": [
-                    {"role": "system", "content": spec.system_prompt},
-                    {"role": "user", "content": user},
-                ],
-                "temperature": 0.3,
-                "max_tokens": 600,
-            },
-            timeout=90,
-        )
-        r.raise_for_status()
-        data = r.json()
-        text = data["choices"][0]["message"]["content"].strip()
-        parsed = _parse_json_response(text)
-        if spec.id == "fit" and "score" in parsed:
-            sc = int(parsed.get("score", 0))
-            parsed["score"] = max(1, min(10, sc))
-        return parsed
-    except requests.HTTPError as e:
-        body = ""
+    # Retry on 429 (rate limit) with exponential backoff
+    max_retries = 3
+    last_error: Optional[Exception] = None
+    for attempt in range(max_retries):
         try:
-            err_json = e.response.json()
-            body = err_json.get("error", {}).get("message", "") or e.response.text[:300]
-        except Exception:
-            body = (e.response.text or "")[:300] if e.response is not None else ""
-        status = e.response.status_code if e.response is not None else "?"
-        detail = f"HTTP {status} from {resolved_model}: {body}" if body else f"HTTP {status} from {resolved_model}"
-        logger.warning("Agent %s HTTP error (model=%s): %s — %s", agent_id, resolved_model, status, body)
-        raise RuntimeError(detail) from e
-    except json.JSONDecodeError as e:
-        logger.warning("Agent %s: model returned non-JSON (model=%s): %s", agent_id, resolved_model, e)
-        raise RuntimeError(f"Model {resolved_model} returned invalid JSON — try a different model") from e
-    except Exception as e:
-        logger.warning("Agent %s evaluation failed (model=%s): %s", agent_id, resolved_model, e)
-        raise
+            r = requests.post(
+                _chat_completions_url(),
+                headers=headers,
+                json=payload,
+                timeout=90,
+            )
+            if r.status_code == 429 and attempt < max_retries - 1:
+                wait = int(r.headers.get("retry-after", 2 ** (attempt + 1)))
+                logger.info("Agent %s rate-limited (429), retrying in %ds…", agent_id, wait)
+                time.sleep(min(wait, 30))
+                continue
+            r.raise_for_status()
+            data = r.json()
+            text = data["choices"][0]["message"]["content"].strip()
+            parsed = _parse_json_response(text)
+            if spec.id == "fit" and "score" in parsed:
+                sc = int(parsed.get("score", 0))
+                parsed["score"] = max(1, min(10, sc))
+            return parsed
+        except requests.HTTPError as e:
+            body = ""
+            try:
+                err_json = e.response.json()
+                body = err_json.get("error", {}).get("message", "") or e.response.text[:300]
+            except Exception:
+                body = (e.response.text or "")[:300] if e.response is not None else ""
+            status = e.response.status_code if e.response is not None else "?"
+            detail = f"HTTP {status} from {resolved_model}: {body}" if body else f"HTTP {status} from {resolved_model}"
+            logger.warning("Agent %s HTTP error (model=%s): %s — %s", agent_id, resolved_model, status, body)
+            last_error = RuntimeError(detail)
+            last_error.__cause__ = e
+            if status == 429 and attempt < max_retries - 1:
+                time.sleep(2 ** (attempt + 1))
+                continue
+            raise last_error from e
+        except json.JSONDecodeError as e:
+            logger.warning("Agent %s: model returned non-JSON (model=%s): %s", agent_id, resolved_model, e)
+            raise RuntimeError(f"Model {resolved_model} returned invalid JSON — try a different model") from e
+        except Exception as e:
+            logger.warning("Agent %s evaluation failed (model=%s): %s", agent_id, resolved_model, e)
+            raise
+
+    if last_error:
+        raise last_error
+    raise RuntimeError(f"Agent {agent_id} failed after {max_retries} retries")
 
 
 def auto_evaluate_jobs(
