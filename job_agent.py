@@ -76,7 +76,7 @@ _DEFAULT_MODELS_OPENAI_COM: Dict[str, str] = {
 def _default_model_for_agent(agent_id: str) -> str:
     if _using_openrouter():
         return _DEFAULT_MODELS_OPENROUTER.get(
-            agent_id, "qwen/qwen3-next-80b-a3b-instruct:free"
+            agent_id, "google/gemma-4-26b-a4b-it:free"
         )
     return _DEFAULT_MODELS_OPENAI_COM.get(agent_id, "gpt-4o-mini")
 
@@ -283,9 +283,17 @@ def _spec_by_id(agent_id: str) -> Optional[AgentSpec]:
 
 def _parse_json_response(text: str) -> Dict[str, Any]:
     t = text.strip()
+    # Strip Qwen-style <think>…</think> reasoning blocks
+    t = re.sub(r"<think>[\s\S]*?</think>", "", t).strip()
+    # Strip markdown code fences
     if t.startswith("```"):
         t = re.sub(r"^```[a-zA-Z]*\s*", "", t)
         t = re.sub(r"\s*```$", "", t).strip()
+    # Last resort: find first { … } in the response
+    if not t.startswith("{"):
+        m = re.search(r"\{[\s\S]*\}", t)
+        if m:
+            t = m.group(0)
     return json.loads(t)
 
 
@@ -350,11 +358,17 @@ def evaluate_job(
     except requests.HTTPError as e:
         body = ""
         try:
-            body = e.response.json().get("error", {}).get("message", "") or e.response.text[:200]
+            err_json = e.response.json()
+            body = err_json.get("error", {}).get("message", "") or e.response.text[:300]
         except Exception:
-            pass
-        logger.warning("Agent %s HTTP error (model=%s): %s %s", agent_id, resolved_model, e, body)
-        raise RuntimeError(f"Model {resolved_model} error: {body or str(e)}") from e
+            body = (e.response.text or "")[:300] if e.response is not None else ""
+        status = e.response.status_code if e.response is not None else "?"
+        detail = f"HTTP {status} from {resolved_model}: {body}" if body else f"HTTP {status} from {resolved_model}"
+        logger.warning("Agent %s HTTP error (model=%s): %s — %s", agent_id, resolved_model, status, body)
+        raise RuntimeError(detail) from e
+    except json.JSONDecodeError as e:
+        logger.warning("Agent %s: model returned non-JSON (model=%s): %s", agent_id, resolved_model, e)
+        raise RuntimeError(f"Model {resolved_model} returned invalid JSON — try a different model") from e
     except Exception as e:
         logger.warning("Agent %s evaluation failed (model=%s): %s", agent_id, resolved_model, e)
         raise
