@@ -11,7 +11,9 @@ import hmac
 import logging
 import os
 import sys
+import threading
 import time
+import uuid
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -254,13 +256,24 @@ def agent_debug() -> Dict[str, Any]:
     }
 
 
-@protected.post("/agent/evaluate")
-def agent_evaluate(body: AgentBody) -> Dict[str, Any]:
-    if not is_agent_configured():
-        raise HTTPException(
-            status_code=503,
-            detail="No API key found. Set OPENROUTER_API_KEY or OPENAI_API_KEY in .env (check /api/agent/debug for details).",
-        )
+# Async agent evaluation — returns immediately with a task_id so
+# Cloudflare Tunnel / reverse proxies don't time out on slow LLM calls.
+_agent_tasks: Dict[str, Dict[str, Any]] = {}
+_AGENT_TASK_TTL = 300  # seconds before a finished task is garbage-collected
+
+
+def _gc_agent_tasks() -> None:
+    now = time.time()
+    expired = [
+        tid for tid, t in _agent_tasks.items()
+        if t.get("done") and now - t.get("finished_at", now) > _AGENT_TASK_TTL
+    ]
+    for tid in expired:
+        _agent_tasks.pop(tid, None)
+
+
+def _run_agent_task(task_id: str, body: AgentBody) -> None:
+    task = _agent_tasks[task_id]
     try:
         result = evaluate_job(
             body.title,
@@ -268,11 +281,50 @@ def agent_evaluate(body: AgentBody) -> Dict[str, Any]:
             body.description,
             agent_id=body.agent_id,
         )
+        if result is None:
+            task["error"] = "Agent returned no result."
+        else:
+            task["result"] = result
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    if result is None:
-        raise HTTPException(status_code=502, detail="Agent returned no result.")
-    return {"agent_id": body.agent_id, "result": result}
+        task["error"] = str(exc)
+    finally:
+        task["done"] = True
+        task["finished_at"] = time.time()
+
+
+@protected.post("/agent/evaluate")
+def agent_evaluate(body: AgentBody) -> Dict[str, Any]:
+    if not is_agent_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="No API key found. Set OPENROUTER_API_KEY or OPENAI_API_KEY in .env (check /api/agent/debug for details).",
+        )
+    _gc_agent_tasks()
+    task_id = uuid.uuid4().hex[:12]
+    _agent_tasks[task_id] = {
+        "agent_id": body.agent_id,
+        "done": False,
+        "result": None,
+        "error": None,
+        "started_at": time.time(),
+        "finished_at": None,
+    }
+    t = threading.Thread(target=_run_agent_task, args=(task_id, body), daemon=True)
+    t.start()
+    return {"task_id": task_id, "status": "pending"}
+
+
+@protected.get("/agent/result/{task_id}")
+def agent_result(task_id: str) -> Dict[str, Any]:
+    task = _agent_tasks.get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found or expired.")
+    if not task["done"]:
+        elapsed = int(time.time() - task["started_at"])
+        return {"status": "pending", "elapsed_seconds": elapsed}
+    if task["error"]:
+        return {"status": "error", "error": task["error"], "agent_id": task["agent_id"]}
+    return {"status": "done", "agent_id": task["agent_id"], "result": task["result"]}
 
 
 @protected.get("/profile")

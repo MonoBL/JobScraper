@@ -912,6 +912,7 @@ export default function App({ initialView = "dashboard" }: AppProps) {
     setAgentBusy(busyKey);
     console.log("[agent] calling /api/agent/evaluate", { agentId, title: job.title });
     try {
+      // 1. Submit — returns immediately with a task_id
       const r = await apiFetch("/api/agent/evaluate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -924,35 +925,53 @@ export default function App({ initialView = "dashboard" }: AppProps) {
         }),
       });
       if (!r.ok) {
-        const err = await r.json().catch(() => ({}));
-        console.error("[agent] HTTP", r.status, err);
-        const detail = err.detail;
-        const msg = Array.isArray(detail)
-          ? detail.map((d: { msg?: string }) => d.msg).join(", ")
-          : typeof detail === "string"
-            ? detail
-            : r.statusText;
-        throw new Error(`${r.status}: ${msg || r.statusText}`);
+        const text = await r.text();
+        let msg = `${r.status}: ${r.statusText}`;
+        try {
+          const err = JSON.parse(text);
+          if (typeof err.detail === "string") msg = `${r.status}: ${err.detail}`;
+        } catch { /* Cloudflare HTML or non-JSON */ }
+        throw new Error(msg);
       }
-      const data = await r.json();
-      console.log("[agent] success", data);
-      const result = data.result as Record<string, unknown>;
-      setAgentResults((prev) => ({
-        ...prev,
-        [jobKey]: {
-          ...(prev[jobKey] || {}),
-          [agentId]: { data: result },
-        },
-      }));
+      const submit = await r.json();
+      const taskId = submit.task_id as string;
+      if (!taskId) {
+        if (submit.result) {
+          setAgentResults((prev) => ({
+            ...prev,
+            [jobKey]: { ...(prev[jobKey] || {}), [agentId]: { data: submit.result } },
+          }));
+          return;
+        }
+        throw new Error("No task_id returned");
+      }
+
+      // 2. Poll for result every 2s (up to 2 minutes)
+      const maxPolls = 60;
+      for (let i = 0; i < maxPolls; i++) {
+        await new Promise((res) => setTimeout(res, 2000));
+        const pr = await apiFetch(`/api/agent/result/${taskId}`);
+        if (!pr.ok) throw new Error(`Poll failed: ${pr.status}`);
+        const poll = await pr.json();
+        console.log("[agent] poll", i, poll.status, poll.elapsed_seconds ?? "");
+        if (poll.status === "pending") continue;
+        if (poll.status === "error") throw new Error(poll.error || "Agent failed");
+        if (poll.status === "done" && poll.result) {
+          setAgentResults((prev) => ({
+            ...prev,
+            [jobKey]: { ...(prev[jobKey] || {}), [agentId]: { data: poll.result } },
+          }));
+          return;
+        }
+        throw new Error("Unexpected poll response");
+      }
+      throw new Error("Agent timed out after 2 minutes");
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "Agent failed";
       console.error("[agent] error:", msg);
       setAgentResults((prev) => ({
         ...prev,
-        [jobKey]: {
-          ...(prev[jobKey] || {}),
-          [agentId]: { error: msg },
-        },
+        [jobKey]: { ...(prev[jobKey] || {}), [agentId]: { error: msg } },
       }));
     } finally {
       setAgentBusy(null);
