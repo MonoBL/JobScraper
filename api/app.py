@@ -240,17 +240,17 @@ def agent_evaluate(body: AgentBody) -> Dict[str, Any]:
             status_code=503,
             detail="Set OPENROUTER_API_KEY or OPENAI_API_KEY in .env to enable agents.",
         )
-    result = evaluate_job(
-        body.title,
-        body.company,
-        body.description,
-        agent_id=body.agent_id,
-    )
-    if result is None:
-        raise HTTPException(
-            status_code=502,
-            detail="Agent request failed (unknown agent_id or LLM error).",
+    try:
+        result = evaluate_job(
+            body.title,
+            body.company,
+            body.description,
+            agent_id=body.agent_id,
         )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=502, detail="Agent returned no result.")
     return {"agent_id": body.agent_id, "result": result}
 
 

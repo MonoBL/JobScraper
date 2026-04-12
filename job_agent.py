@@ -66,8 +66,8 @@ def _using_openrouter() -> bool:
 # Defaults when no AGENT_*_MODEL is set — OpenRouter uses provider/model slugs; OpenAI.com uses their model names.
 # OpenRouter defaults (free-tier slugs; override with AGENT_*_MODEL if a slug changes)
 _DEFAULT_MODELS_OPENROUTER: Dict[str, str] = {
-    "fit": "qwen/qwen3-next-80b-a3b-instruct:free",
-    "critique": "meta-llama/llama-3.3-70b-instruct:free",
+    "fit": "google/gemma-4-26b-a4b-it:free",
+    "critique": "google/gemma-4-26b-a4b-it:free",
     "checklist": "google/gemma-4-26b-a4b-it:free",
 }
 _DEFAULT_MODELS_OPENAI_COM: Dict[str, str] = {
@@ -377,9 +377,17 @@ def evaluate_job(
             sc = int(parsed.get("score", 0))
             parsed["score"] = max(1, min(10, sc))
         return parsed
+    except requests.HTTPError as e:
+        body = ""
+        try:
+            body = e.response.json().get("error", {}).get("message", "") or e.response.text[:200]
+        except Exception:
+            pass
+        logger.warning("Agent %s HTTP error (model=%s): %s %s", agent_id, resolved_model, e, body)
+        raise RuntimeError(f"Model {resolved_model} error: {body or str(e)}") from e
     except Exception as e:
-        logger.warning("Agent %s evaluation failed: %s", agent_id, e)
-        return None
+        logger.warning("Agent %s evaluation failed (model=%s): %s", agent_id, resolved_model, e)
+        raise
 
 
 def auto_evaluate_jobs(
