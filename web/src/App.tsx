@@ -910,6 +910,7 @@ export default function App({ initialView = "dashboard" }: AppProps) {
     const jobKey = job.url || job.title;
     const busyKey = `${jobKey}::${agentId}`;
     setAgentBusy(busyKey);
+    console.log("[agent] calling /api/agent/evaluate", { agentId, title: job.title });
     try {
       const r = await apiFetch("/api/agent/evaluate", {
         method: "POST",
@@ -924,15 +925,17 @@ export default function App({ initialView = "dashboard" }: AppProps) {
       });
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
+        console.error("[agent] HTTP", r.status, err);
         const detail = err.detail;
         const msg = Array.isArray(detail)
           ? detail.map((d: { msg?: string }) => d.msg).join(", ")
           : typeof detail === "string"
             ? detail
             : r.statusText;
-        throw new Error(msg || r.statusText);
+        throw new Error(`${r.status}: ${msg || r.statusText}`);
       }
       const data = await r.json();
+      console.log("[agent] success", data);
       const result = data.result as Record<string, unknown>;
       setAgentResults((prev) => ({
         ...prev,
@@ -943,6 +946,7 @@ export default function App({ initialView = "dashboard" }: AppProps) {
       }));
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "Agent failed";
+      console.error("[agent] error:", msg);
       setAgentResults((prev) => ({
         ...prev,
         [jobKey]: {
@@ -1219,7 +1223,17 @@ export default function App({ initialView = "dashboard" }: AppProps) {
               Jump to today
             </button>
             {health.agent === false && (
-              <span> · Agents: set OPENROUTER_API_KEY or OPENAI_API_KEY</span>
+              <span>
+                {" "}· Agents: set OPENROUTER_API_KEY or OPENAI_API_KEY —{" "}
+                <a
+                  href="/api/agent/debug"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{ color: "var(--danger)", textDecoration: "underline" }}
+                >
+                  debug info
+                </a>
+              </span>
             )}
             {!llmDisabled && (health.agent === true || health.agents_enabled === true) && (
               <span>

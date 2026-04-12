@@ -233,12 +233,33 @@ def scrape_sources_list() -> Dict[str, Any]:
     return {"sources": rows, "count": len(rows)}
 
 
+@protected.get("/agent/debug")
+def agent_debug() -> Dict[str, Any]:
+    """Debug view: key loading, base URL, resolved model — no secrets leaked."""
+    from job_agent import _api_key, _base_url, _using_openrouter, _agent_env_model
+    key = _api_key()
+    return {
+        "configured": is_agent_configured(),
+        "provider": "openrouter" if _using_openrouter() else ("openai" if key else "none"),
+        "base_url": _base_url(),
+        "key_length": len(key),
+        "key_prefix": key[:8] + "…" if len(key) > 8 else ("(empty)" if not key else key),
+        "env_checked": [
+            "OPENROUTER_API_KEY",
+            "OPENAI_API_KEY",
+        ],
+        "dotenv_path": os.path.join(_ROOT, ".env"),
+        "dotenv_exists": os.path.isfile(os.path.join(_ROOT, ".env")),
+        "fit_model": _agent_env_model("fit"),
+    }
+
+
 @protected.post("/agent/evaluate")
 def agent_evaluate(body: AgentBody) -> Dict[str, Any]:
     if not is_agent_configured():
         raise HTTPException(
             status_code=503,
-            detail="Set OPENROUTER_API_KEY or OPENAI_API_KEY in .env to enable agents.",
+            detail="No API key found. Set OPENROUTER_API_KEY or OPENAI_API_KEY in .env (check /api/agent/debug for details).",
         )
     try:
         result = evaluate_job(
