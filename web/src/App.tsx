@@ -65,23 +65,12 @@ type AgentResultEntry = {
   error?: string;
 };
 
+// SIMPLIFIED — only fit agent remains.
 const FALLBACK_AGENTS: AgentMeta[] = [
   {
     id: "fit",
     label: "Role fit",
-    description: "Scores vs DevOps / infra / platform targets.",
-    model: "",
-  },
-  {
-    id: "critique",
-    label: "Posting critique",
-    description: "Skeptical read of the listing.",
-    model: "",
-  },
-  {
-    id: "checklist",
-    label: "Before you apply",
-    description: "Prep and questions before applying.",
+    description: "Scores 1-10 vs DevOps / infra / platform targets.",
     model: "",
   },
 ];
@@ -166,7 +155,7 @@ const SCRAPE_PHASE_MESSAGES = [
   "General & remote listings…",
   "Ranking with JobRanker…",
   "Saving history & Discord…",
-  "AI agents (fit / critique / checklist) work on cards next…",
+  "AI fit scoring on top jobs…",
 ];
 
 function formatCountdown(totalSeconds: number): string {

@@ -64,16 +64,12 @@ def _using_openrouter() -> bool:
 
 
 # Defaults when no AGENT_*_MODEL is set — OpenRouter uses provider/model slugs; OpenAI.com uses their model names.
-# OpenRouter defaults (free-tier slugs; override with AGENT_*_MODEL if a slug changes)
+# SIMPLIFIED — single "fit" agent; critique/checklist removed.
 _DEFAULT_MODELS_OPENROUTER: Dict[str, str] = {
     "fit": "google/gemma-4-26b-a4b-it:free",
-    "critique": "google/gemma-4-26b-a4b-it:free",
-    "checklist": "google/gemma-4-26b-a4b-it:free",
 }
 _DEFAULT_MODELS_OPENAI_COM: Dict[str, str] = {
     "fit": "gpt-4o-mini",
-    "critique": "gpt-4o",
-    "checklist": "gpt-4o-mini",
 }
 
 
@@ -94,6 +90,7 @@ class AgentSpec:
     response_hint: str
 
 
+# SIMPLIFIED — only the fit agent remains.
 def _builtin_agents() -> List[AgentSpec]:
     """Built-in agents; resolved model = env AGENT_<ID>_MODEL or provider-specific defaults."""
     return [
@@ -109,33 +106,6 @@ def _builtin_agents() -> List[AgentSpec]:
             response_hint=(
                 '{"score": 1-10, "fit": "one short sentence", '
                 '"strengths": ["..."], "concerns": ["..."]}'
-            ),
-        ),
-        AgentSpec(
-            id="critique",
-            label="Posting critique",
-            description="Skeptical read: hype, vague scope, red flags in the listing.",
-            system_prompt=(
-                "You critically read job postings for inflated titles, vague responsibilities, "
-                "unrealistic stacks, or mismatch with infra/DevOps work. "
-                "Respond ONLY with valid JSON, no markdown."
-            ),
-            response_hint=(
-                '{"summary": "one sentence", "suspicious_or_vague": ["..."], '
-                '"possible_red_flags": ["..."], "things_to_verify": ["..."]}'
-            ),
-        ),
-        AgentSpec(
-            id="checklist",
-            label="Before you apply",
-            description="Concrete questions and prep before spending time on this role.",
-            system_prompt=(
-                "You help a candidate decide whether to apply and what to clarify with the employer. "
-                "Respond ONLY with valid JSON, no markdown."
-            ),
-            response_hint=(
-                '{"recommendation": "apply|maybe|pass", "confidence_1_to_10": 7, '
-                '"questions_to_ask": ["..."], "prep_notes": "short paragraph"}'
             ),
         ),
     ]
@@ -435,7 +405,7 @@ def _resume_profile_model() -> str:
     o = os.getenv("AGENT_RESUME_PROFILE_MODEL", "").strip()
     if o:
         return o
-    return _default_model_for_agent("critique")
+    return _default_model_for_agent("fit")
 
 
 def review_resume_for_search_profile(resume_text: str) -> Optional[Dict[str, Any]]:

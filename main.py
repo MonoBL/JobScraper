@@ -298,36 +298,31 @@ class JobRanker:
         if keyword_count >= 1:
             return JobPriority.GOOD_MATCH, f"Good match: Technical keywords found ({keyword_count})"
 
-        # Weak Match: Only include jobs with clear technical/IT relevance
-        # Must have at least one strong technical keyword
-        # Exclude creative/art roles that aren't IT-related
-        technical_keywords = ['support', 'operations', 'infrastructure', 'linux', 'python', 'devops',
-                             'engineer', 'developer', 'admin', 'sysadmin', 'it',
-                             'network', 'server', 'cloud', 'kubernetes', 'docker', 'monitoring',
-                             'systems', 'platform', 'backend', 'frontend', 'sre', 'sre engineer',
-                             'site reliability', 'infrastructure engineer', 'technical support',
-                             'automation', 'product engineer', 'product manager', 'ci/cd', 'pipeline']
-        
-        # Exclude creative/art roles from technical keywords
-        creative_roles = ['artist', 'designer', 'illustrator', 'animator', 'creative', 'ui/ux designer']
-        has_creative_role = any(role in title_lower for role in creative_roles)
-        
-        has_technical = any(kw in combined for kw in technical_keywords)
-        
-        # Only weak match if it's technical AND not a creative role
-        if has_technical and not has_creative_role:
-            return JobPriority.WEAK_MATCH, "Weak match: Some technical relevance"
-        
-        # Only show crypto/web3 jobs if they have some technical aspect
-        crypto_keywords = ['crypto', 'blockchain', 'web3', 'defi', 'bitcoin', 'ethereum', 'nft']
-        has_crypto = any(kw in combined for kw in crypto_keywords)
-        
-        # Only show crypto jobs if they also mention technical terms
-        if has_crypto and (has_technical or 'engineer' in combined or 'developer' in combined or 'technical' in combined):
-            return JobPriority.WEAK_MATCH, "Weak match: Crypto/Web3 with technical aspects"
+        # SIMPLIFIED — tightened weak-match gate.
+        # Title must contain an explicit infra/DevOps term, OR the description
+        # must have 2+ PERFECT_KEYWORDS hits AND the title has at least 1 technical word.
+        _WEAK_TITLE_TERMS = [
+            "sysadmin", "devops", "linux", "infrastructure", "platform",
+            "sre", "it support", "it administrator", "automation", "cloud",
+        ]
+        _TITLE_TECH_WORDS = [
+            "engineer", "developer", "admin", "operator", "architect",
+            "support", "systems", "technical", "network", "server",
+        ]
 
-        # Blacklist everything else - too generic or not IT-related
-        return JobPriority.BLACKLISTED, "Not IT-related - too generic or irrelevant"
+        has_weak_title = any(t in title_lower for t in _WEAK_TITLE_TERMS)
+
+        if not has_weak_title:
+            desc_kw_hits = sum(
+                1 for group in pk.values()
+                if any(kw in combined for kw in group)
+            )
+            title_has_tech = any(t in title_lower for t in _TITLE_TECH_WORDS)
+            if desc_kw_hits >= 2 and title_has_tech:
+                return JobPriority.WEAK_MATCH, f"Weak match: {desc_kw_hits} keyword groups + technical title"
+            return JobPriority.BLACKLISTED, "Not IT-related — too generic or irrelevant"
+
+        return JobPriority.WEAK_MATCH, "Weak match: title contains infra/DevOps term"
 
 
 class CruiseJobRanker:
@@ -470,6 +465,23 @@ class JobScraper:
     def parse_job(self, element, job_url: str = None) -> Optional[Job]:
         """Parse a job element. Override in subclasses."""
         raise NotImplementedError
+
+    # SIMPLIFIED — shared selector fallback chain so scrapers don't repeat it.
+    @staticmethod
+    def find_job_elements(soup, selectors: list) -> list:
+        """Try each selector in order; return the first non-empty result."""
+        for sel in selectors:
+            if isinstance(sel, str):
+                results = soup.select(sel)
+            elif isinstance(sel, dict):
+                results = soup.find_all(**sel)
+            elif isinstance(sel, tuple) and len(sel) == 2:
+                results = soup.find_all(sel[0], sel[1])
+            else:
+                continue
+            if results:
+                return results
+        return []
     
     async def handle_infinite_scroll(self, page: Page, max_scrolls: int = 3) -> None:
         """Handle infinite scroll by scrolling down and waiting for new content"""
@@ -793,36 +805,16 @@ class Web3CareerScraper(JobScraper):
             
             soup = BeautifulSoup(content, 'html.parser')
             
-            # Advanced selector strategy for Web3.career
-            job_elements = []
-            
-            # Strategy 1: Table structure (primary)
-            job_elements = soup.select('tbody tr')
-            
-            # Strategy 2: Div table rows
-            if not job_elements:
-                job_elements = soup.find_all('div', class_=re.compile(r'table_row|table-row', re.I))
-            
-            # Strategy 3: Generic row classes
-            if not job_elements:
-                job_elements = soup.find_all('div', class_=re.compile(r'row', re.I))
-            
-            # Strategy 4: Table rows without tbody
-            if not job_elements:
-                job_elements = soup.find_all('tr', class_=re.compile(r'job|listing|row', re.I))
-            
-            # Strategy 5: Article/div with job classes
-            if not job_elements:
-                job_elements = soup.find_all(['article', 'div'], class_=re.compile(r'job|listing|card', re.I))
-            
-            # Strategy 6: Links to job pages
-            if not job_elements:
-                job_elements = soup.find_all('a', href=re.compile(r'/job/|/jobs/'))
-            
-            # Strategy 7: Data attributes
-            if not job_elements:
-                job_elements = soup.find_all(['div', 'li'], attrs={'data-job-id': True}) or \
-                              soup.find_all(['div', 'li'], class_=re.compile(r'item|post', re.I))
+            # SIMPLIFIED — use shared selector chain
+            job_elements = self.find_job_elements(soup, [
+                'tbody tr',
+                ('div', {'class_': re.compile(r'table_row|table-row', re.I)}),
+                ('div', {'class_': re.compile(r'row', re.I)}),
+                ('tr', {'class_': re.compile(r'job|listing|row', re.I)}),
+                (['article', 'div'], {'class_': re.compile(r'job|listing|card', re.I)}),
+                ('a', {'href': re.compile(r'/job/|/jobs/')}),
+                (['div', 'li'], {'attrs': {'data-job-id': True}}),
+            ])
             
             logger.info(f"Found {len(job_elements)} potential job elements from {self.source_name}")
             
@@ -958,28 +950,14 @@ class CryptoJobsListScraper(JobScraper):
             
             soup = BeautifulSoup(content, 'html.parser')
             
-            # Advanced selector strategy: Try multiple approaches
-            job_elements = []
-            
-            # Strategy 1: Data attributes (most reliable)
-            job_elements = soup.find_all(attrs={'data-job-id': True})
-            
-            # Strategy 2: Semantic HTML
-            if not job_elements:
-                job_elements = soup.find_all('article')
-            
-            # Strategy 3: Class-based selectors with multiple patterns
-            if not job_elements:
-                job_elements = soup.find_all(['div', 'li'], class_=re.compile(r'job|listing|card|item|post', re.I))
-            
-            # Strategy 4: Links to job pages
-            if not job_elements:
-                job_elements = soup.find_all('a', href=re.compile(r'/job/|/jobs/|/position/'))
-            
-            # Strategy 5: Generic selectors
-            if not job_elements:
-                job_elements = soup.find_all(['div', 'section'], attrs={'data-job': True}) or \
-                              soup.find_all(['div', 'li'], class_=re.compile(r'post|entry', re.I))
+            # SIMPLIFIED — use shared selector chain
+            job_elements = self.find_job_elements(soup, [
+                {'attrs': {'data-job-id': True}},
+                'article',
+                (['div', 'li'], {'class_': re.compile(r'job|listing|card|item|post', re.I)}),
+                ('a', {'href': re.compile(r'/job/|/jobs/|/position/')}),
+                (['div', 'section'], {'attrs': {'data-job': True}}),
+            ])
             
             logger.info(f"Found {len(job_elements)} potential job elements from {self.source_name}")
             
@@ -1156,31 +1134,21 @@ class CryptocurrencyJobsScraper(JobScraper):
             
             soup = BeautifulSoup(content, 'html.parser')
             
-            # Advanced selector strategy
+            # SIMPLIFIED — primary: H2 headings in <main>; fallback: shared chain.
             job_elements = []
-            
-            # Strategy 1: H2 headings in main (original approach)
             main_elem = soup.find('main')
             if main_elem:
-                h2_elements = main_elem.find_all('h2')
-                # Convert H2 elements to job elements for consistent parsing
-                for h2 in h2_elements:
-                    title_text = h2.get_text(strip=True)
-                    if title_text and len(title_text) >= 5:
-                        if 'talent collective' not in title_text.lower() and 'subscribe' not in title_text.lower():
-                            job_elements.append(h2)
-            
-            # Strategy 2: Article elements
+                for h2 in main_elem.find_all('h2'):
+                    txt = h2.get_text(strip=True)
+                    if txt and len(txt) >= 5 and 'talent collective' not in txt.lower() and 'subscribe' not in txt.lower():
+                        job_elements.append(h2)
+
             if not job_elements:
-                job_elements = soup.find_all('article')
-            
-            # Strategy 3: Links to job pages
-            if not job_elements:
-                job_elements = soup.find_all('a', href=re.compile(r'/job/|/jobs/'))
-            
-            # Strategy 4: Data attributes
-            if not job_elements:
-                job_elements = soup.find_all(['div', 'li'], attrs={'data-job-id': True})
+                job_elements = self.find_job_elements(soup, [
+                    'article',
+                    ('a', {'href': re.compile(r'/job/|/jobs/')}),
+                    (['div', 'li'], {'attrs': {'data-job-id': True}}),
+                ])
             
             logger.info(f"Found {len(job_elements)} potential job elements from {self.source_name}")
             
@@ -3469,23 +3437,37 @@ class DiscordNotifier:
         # Send embeds in batches respecting Discord's 6000-char limit
         self._send_embeds_batched(all_embeds)
 
-        # ── 3. Weak matches as compact text ──
+        # SIMPLIFIED — cap weak matches: >20 total → only show those whose title
+        # matches at least one PERFECT_TITLES entry; always show count in header.
         if weak_matches:
-            weak_text = "## 🔍 Other Potential Roles\n"
+            total_weak = len(weak_matches)
+            if total_weak > 20:
+                perfect_t = [t.lower() for t in JobRanker.PERFECT_TITLES]
+                filtered = [
+                    j for j in weak_matches
+                    if any(pt in j.title.lower() for pt in perfect_t)
+                ]
+                shown_weak = filtered
+            else:
+                shown_weak = weak_matches
+
+            header_label = f"## 🔍 {total_weak} weak matches"
+            if len(shown_weak) != total_weak:
+                header_label += f" (filtered to {len(shown_weak)} shown)"
+            weak_text = header_label + "\n"
+
+            remaining_weak_matches = []
             shown_count = 0
-            for job in weak_matches:
+            for job in shown_weak:
                 title = job.title[:70] + "..." if len(job.title) > 70 else job.title
                 company = job.company[:25] + "..." if len(job.company) > 25 else job.company
                 dot = self._seniority_dot(job.title)
                 cat_icon = self._CAT_META.get(_job_category(job), ("📌",))[0]
                 line = f"{dot} **{title}** @ {company} {cat_icon} — [View]({job.url})\n"
                 if len(weak_text) + len(line) > 1850:
-                    remaining_weak_matches = weak_matches[shown_count:]
+                    remaining_weak_matches = shown_weak[shown_count:]
                     remaining = len(remaining_weak_matches)
-                    if include_all_weak_matches:
-                        weak_text += f"\n*… and {remaining} more (continued below)*"
-                    else:
-                        weak_text += f"\n*… and {remaining} more (sent at follow-up)*"
+                    weak_text += f"\n*… and {remaining} more*"
                     break
                 weak_text += line
                 shown_count += 1
@@ -3493,32 +3475,27 @@ class DiscordNotifier:
             self._send_payload({"content": weak_text, "embeds": []})
             time.sleep(0.5)
 
-            if not include_all_weak_matches and remaining_weak_matches:
+            if remaining_weak_matches and not include_all_weak_matches:
                 save_remaining_weak_matches(remaining_weak_matches)
-
-        # ── 4. Overflow weak matches (startup run) ──
-        if include_all_weak_matches and remaining_weak_matches:
-            logger.info(f"Sending {len(remaining_weak_matches)} additional weak matches...")
-            chunks_text = []
-            current = "## 🔍 Other Potential Roles (continued)\n"
-            for job in remaining_weak_matches:
-                title = job.title[:70] + "..." if len(job.title) > 70 else job.title
-                company = job.company[:25] + "..." if len(job.company) > 25 else job.company
-                dot = self._seniority_dot(job.title)
-                cat_icon = self._CAT_META.get(_job_category(job), ("📌",))[0]
-                line = f"{dot} **{title}** @ {company} {cat_icon} — [View]({job.url})\n"
-                if len(current) + len(line) > 1900:
+            elif remaining_weak_matches and include_all_weak_matches:
+                chunks_text = []
+                current = "## 🔍 Weak matches (continued)\n"
+                for job in remaining_weak_matches:
+                    title = job.title[:70] + "..." if len(job.title) > 70 else job.title
+                    company = job.company[:25] + "..." if len(job.company) > 25 else job.company
+                    dot = self._seniority_dot(job.title)
+                    cat_icon = self._CAT_META.get(_job_category(job), ("📌",))[0]
+                    line = f"{dot} **{title}** @ {company} {cat_icon} — [View]({job.url})\n"
+                    if len(current) + len(line) > 1900:
+                        chunks_text.append(current)
+                        current = "## 🔍 Weak matches (continued)\n" + line
+                    else:
+                        current += line
+                if current.strip():
                     chunks_text.append(current)
-                    current = "## 🔍 Other Potential Roles (continued)\n" + line
-                else:
-                    current += line
-            if current.strip():
-                chunks_text.append(current)
-            for chunk_text in chunks_text:
-                self._send_payload({"content": chunk_text, "embeds": []})
-                time.sleep(0.5)
-        elif not include_all_weak_matches and remaining_weak_matches:
-            logger.info(f"Saved {len(remaining_weak_matches)} remaining weak matches for follow-up")
+                for chunk_text in chunks_text:
+                    self._send_payload({"content": chunk_text, "embeds": []})
+                    time.sleep(0.5)
 
         logger.info(f"Discord report sent — {len(jobs)} jobs total")
 
@@ -4093,7 +4070,7 @@ async def run_daily_scrape_async(is_startup_run: bool = False, progress: Optiona
                 if progress is not None:
                     progress["error"] = f"History write failed: {e}"
 
-        # Auto-evaluate top jobs with fit agent (runs after history is saved)
+        # SIMPLIFIED — auto-evaluate + fit score threshold.
         _prog("ai_eval")
         try:
             from job_agent import auto_evaluate_jobs, is_agent_configured
@@ -4110,15 +4087,53 @@ async def run_daily_scrape_async(is_startup_run: bool = False, progress: Optiona
                         store = load_all_history()
                         history_jobs = store.get(day, [])
                         url_idx = {j.get("url", ""): i for i, j in enumerate(history_jobs)}
+
+                        # Apply fit-score threshold: <5 → WEAK, <3 → BLACKLISTED
+                        job_by_url = {j.url: j for j in new_jobs}
                         for url, result in fit_results.items():
+                            score = result.get("score")
+                            if isinstance(score, (int, float)):
+                                j = job_by_url.get(url)
+                                if j is not None:
+                                    if score < 3:
+                                        j.priority = JobPriority.BLACKLISTED
+                                        j.priority_reason = f"Fit score {score}/10 — auto-blacklisted"
+                                        logger.info("Downgraded %s to BLACKLISTED (fit %s)", j.title[:50], score)
+                                    elif score < 5:
+                                        j.priority = JobPriority.WEAK_MATCH
+                                        j.priority_reason = f"Fit score {score}/10 — downgraded to weak"
+                                        logger.info("Downgraded %s to WEAK (fit %s)", j.title[:50], score)
+
                             idx = url_idx.get(url)
                             if idx is not None:
                                 if "agent_results" not in history_jobs[idx]:
                                     history_jobs[idx]["agent_results"] = {}
                                 history_jobs[idx]["agent_results"]["fit"] = result
+                                # Persist priority changes into history
+                                j = job_by_url.get(url)
+                                if j is not None:
+                                    history_jobs[idx]["priority"] = j.priority.name
+                                    history_jobs[idx]["priority_reason"] = j.priority_reason
+
+                        # Remove auto-blacklisted entries from history so the
+                        # dashboard never shows them.
+                        blacklisted_urls = {
+                            j.url for j in job_by_url.values()
+                            if j.priority == JobPriority.BLACKLISTED
+                        }
+                        if blacklisted_urls:
+                            history_jobs = [
+                                h for h in history_jobs
+                                if h.get("url", "") not in blacklisted_urls
+                            ]
+                            logger.info("Removed %d auto-blacklisted jobs from history", len(blacklisted_urls))
+
                         store[day] = history_jobs
                         _atomic_write_json(_history_path(), store)
                         logger.info(f"Stored fit scores for {len(fit_results)} jobs")
+
+                        # Drop blacklisted jobs from the list that goes to Discord
+                        new_jobs = [j for j in new_jobs if j.priority != JobPriority.BLACKLISTED]
         except Exception as e:
             logger.warning("Auto-eval failed (non-fatal): %s", e)
 
