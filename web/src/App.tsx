@@ -843,10 +843,15 @@ export default function App({ initialView = "dashboard" }: AppProps) {
         const msg = typeof det === "string" ? det : r.statusText;
         throw new Error(msg || r.statusText);
       }
-      setProfileMsg(data.summary || "Ranker overrides updated from liked jobs.");
+      const successMsg = data.summary || "Ranker rules successfully updated from your liked jobs!";
+      setProfileMsg(successMsg);
+      // Give the user an unmistakable popup that it worked
+      window.alert(`✅ Success!\n\n${successMsg}`);
       await loadProfile();
     } catch (e: unknown) {
-      setProfileMsg(e instanceof Error ? e.message : "Review failed");
+      const errorMsg = e instanceof Error ? e.message : "Review failed";
+      setProfileMsg(errorMsg);
+      window.alert(`❌ Failed: ${errorMsg}`);
     } finally {
       setReviewBusy(false);
     }
