@@ -326,6 +326,14 @@ class JobRanker:
         if has_crypto and (has_technical or 'engineer' in combined or 'developer' in combined or 'technical' in combined):
             return JobPriority.WEAK_MATCH, "Weak match: Crypto/Web3 with technical aspects"
 
+        # Default: be more aggressive (include more borderline jobs as WEAK_MATCH).
+        # To disable, set JOB_RANKER_MODE=normal.
+        mode = os.getenv("JOB_RANKER_MODE", "aggressive").strip().lower()
+        if mode not in ("normal", "strict", "off", "0", "false", "no"):
+            title_hint_terms = ["engineer", "developer", "devops", "sre", "platform", "infra", "it ", "support", "ops", "automation"]
+            if has_crypto or any(t in title_lower for t in title_hint_terms):
+                return JobPriority.WEAK_MATCH, "Weak match: Aggressive mode inclusion"
+
         # Blacklist everything else - too generic or not IT-related
         return JobPriority.BLACKLISTED, "Not IT-related - too generic or irrelevant"
 

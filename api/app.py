@@ -36,6 +36,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from job_history import get_jobs_for_date, list_date_summaries, today_iso
 from feedback_store import upsert_feedback, load_all_feedback, list_feedback
+from application_store import upsert_application, load_application_map, list_applications
 from job_agent import (
     evaluate_job,
     get_llm_diagnostics,
@@ -333,6 +334,28 @@ def post_feedback(body: FeedbackBody) -> Dict[str, Any]:
 @protected.get("/feedback")
 def get_all_feedback() -> Dict[str, Any]:
     return {"feedback": load_all_feedback()}
+
+
+class ApplicationBody(BaseModel):
+    url: str = Field(..., min_length=1)
+    title: str = ""
+    company: str = ""
+    status: str = Field(..., pattern="^(applied|not_applied)$")
+
+
+@protected.post("/applications")
+def post_application(body: ApplicationBody) -> Dict[str, Any]:
+    try:
+        entry = upsert_application(body.url, body.title, body.company, body.status)  # type: ignore[arg-type]
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "entry": entry}
+
+
+@protected.get("/applications")
+def get_applications() -> Dict[str, Any]:
+    """List all application decisions and provide a fast URL->status map."""
+    return {"applications": list_applications(), "map": load_application_map()}
 
 
 class NotificationSettingsBody(BaseModel):
