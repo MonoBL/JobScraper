@@ -1,16 +1,21 @@
 {
   "permissions": {
     "allow": [
-      "Bash(git fetch:*)",
-      "Bash(git checkout:*)",
-      "Bash(python3 -c ':*)",
-      "Bash(curl -s http://127.0.0.1:8765/api/health)",
-      "Bash(python3:*)",
-      "Bash(npx tsc:*)",
-      "Bash(node_modules/.bin/tsc --noEmit)",
-      "Bash(git add:*)",
-      "Bash(git commit -m ':*)",
-      "Bash(git push:*)"
+      "Bash(git clone:*)",
+      "Bash(shopt -s dotglob)",
+      "Bash(mv temp_clone/* .)",
+      "Bash(mv temp_clone/.git .)",
+      "Bash(mv temp_clone/.gitignore .)",
+      "Bash(rm -rf temp_clone)",
+      "Bash(cp -r temp_clone/.git .)",
+      "Bash(cp -r temp_clone/* .)",
+      "Bash(ls temp_clone/.[!.]*)",
+      "Bash(rm -rf .git)",
+      "Bash(cp -r temp_clone/.gitignore .)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''main.py''\\).read\\(\\)\\); print\\(''Syntax OK''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''main.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''Syntax OK''\\)\")",
+      "Bash(python -c \"from main import BOT_VERSION, _USER_AGENTS, PlaywrightBrowserManager; print\\(f''Version: {BOT_VERSION}''\\); print\\(f''User agents: {len\\(_USER_AGENTS\\)}''\\)\")",
+      "WebFetch(domain:jobs.solana.com)"
     ]
   }
 }

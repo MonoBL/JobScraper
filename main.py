@@ -320,21 +320,6 @@ class JobRanker:
             title_has_tech = any(t in title_lower for t in _TITLE_TECH_WORDS)
             if desc_kw_hits >= 2 and title_has_tech:
                 return JobPriority.WEAK_MATCH, f"Weak match: {desc_kw_hits} keyword groups + technical title"
-
-            # Default aggressive: include more borderline roles as WEAK_MATCH (opt-out via JOB_RANKER_MODE=normal).
-            mode = os.getenv("JOB_RANKER_MODE", "aggressive").strip().lower()
-            if mode not in ("normal", "strict", "off", "0", "false", "no"):
-                crypto_keywords = [
-                    "crypto", "blockchain", "web3", "defi", "bitcoin", "ethereum", "nft",
-                ]
-                has_crypto = any(kw in combined for kw in crypto_keywords)
-                title_hint_terms = [
-                    "engineer", "developer", "devops", "sre", "platform", "infra", "it ",
-                    "support", "ops", "automation",
-                ]
-                if has_crypto or any(t in title_lower for t in title_hint_terms):
-                    return JobPriority.WEAK_MATCH, "Weak match: Aggressive mode inclusion"
-
             return JobPriority.BLACKLISTED, "Not IT-related — too generic or irrelevant"
 
         return JobPriority.WEAK_MATCH, "Weak match: title contains infra/DevOps term"

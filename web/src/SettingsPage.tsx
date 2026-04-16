@@ -71,14 +71,6 @@ export type SettingsPageProps = {
   resumeUploading: boolean;
   reviewBusy: boolean;
   scrapeSources: Array<{ category: string; name: string; base_url: string }> | null;
-  applications: Array<{
-    url: string;
-    title?: string;
-    company?: string;
-    status: "applied" | "not_applied";
-    date?: string;
-    updated?: string;
-  }>;
 };
 
 function categoryLabel(cat: string): string {
@@ -113,10 +105,7 @@ export function SettingsPage(props: SettingsPageProps) {
     resumeUploading,
     reviewBusy,
     scrapeSources,
-    applications,
   } = props;
-
-  const applied = (applications ?? []).filter((a) => a.status === "applied");
 
   return (
     <div className="settings-page">
@@ -416,42 +405,6 @@ export function SettingsPage(props: SettingsPageProps) {
           </p>
         ) : null}
         {profileMsg ? <p className="profile-msg">{profileMsg}</p> : null}
-      </section>
-
-      <section className="sources-panel settings-section" aria-label="Applied jobs">
-        <h2 className="settings-section-title">Applied jobs</h2>
-        <p className="sources-lead">
-          Jobs you marked as <strong>Apply</strong> from the dashboard. Stored in{" "}
-          <code className="schedule-env">data/applications.json</code> on the server.
-        </p>
-        {applied.length === 0 ? (
-          <p className="llm-agents-muted">No applied jobs yet.</p>
-        ) : (
-          <table className="sources-table">
-            <thead>
-              <tr>
-                <th>Updated</th>
-                <th>Title</th>
-                <th>Company</th>
-                <th>Link</th>
-              </tr>
-            </thead>
-            <tbody>
-              {applied.slice(0, 200).map((a) => (
-                <tr key={a.url}>
-                  <td>{a.updated ?? a.date ?? "—"}</td>
-                  <td>{a.title ?? "—"}</td>
-                  <td>{a.company ?? "—"}</td>
-                  <td>
-                    <a href={a.url} target="_blank" rel="noreferrer noopener" className="sources-link">
-                      open
-                    </a>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
       </section>
     </div>
   );
