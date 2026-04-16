@@ -45,6 +45,17 @@ type JobRow = {
   agent_results?: Record<string, Record<string, unknown>>;
 };
 
+type ApplicationStatus = "applied" | "not_applied";
+
+type ApplicationEntry = {
+  url: string;
+  title?: string;
+  company?: string;
+  status: ApplicationStatus;
+  date?: string;
+  updated?: string;
+};
+
 type DateSummary = {
   date: string;
   count: number;
@@ -273,6 +284,8 @@ export default function App({ initialView = "dashboard" }: AppProps) {
   );
   const [expandedDesc, setExpandedDesc] = useState<Record<string, boolean>>({});
   const [feedback, setFeedback] = useState<Record<string, "good" | "bad">>({});
+  const [applicationsMap, setApplicationsMap] = useState<Record<string, ApplicationStatus>>({});
+  const [applicationsList, setApplicationsList] = useState<ApplicationEntry[]>([]);
   const [scrapeBusy, setScrapeBusy] = useState(false);
   const [scrapeMsg, setScrapeMsg] = useState<string | null>(null);
   const [scrapePolling, setScrapePolling] = useState(false);
@@ -391,7 +404,7 @@ export default function App({ initialView = "dashboard" }: AppProps) {
     const llmOk = healthJson?.agent === true;
     hint("llm", llmOk ? "API key set — agents enabled" : "No OPENROUTER_API_KEY / OPENAI_API_KEY");
 
-    const [agentsR, datesR, schedR, profR, sessR, notifR, diagR, sourcesR, feedbackR] = await Promise.all([
+    const [agentsR, datesR, schedR, profR, sessR, notifR, diagR, sourcesR, feedbackR, appsR] = await Promise.all([
       apiFetch("/api/agents"),
       apiFetch("/api/dates"),
       apiFetch("/api/schedule"),
@@ -401,6 +414,7 @@ export default function App({ initialView = "dashboard" }: AppProps) {
       apiFetch("/api/agents/diagnostics"),
       apiFetch("/api/sources"),
       apiFetch("/api/feedback"),
+      apiFetch("/api/applications"),
     ]);
 
     if (agentsR.ok) {
@@ -498,6 +512,19 @@ export default function App({ initialView = "dashboard" }: AppProps) {
       try {
         const fj = (await feedbackR.json()) as { feedback?: Record<string, string> };
         setFeedback((fj.feedback ?? {}) as Record<string, "good" | "bad">);
+      } catch {
+        // non-fatal
+      }
+    }
+
+    if (appsR.ok) {
+      try {
+        const aj = (await appsR.json()) as {
+          map?: Record<string, ApplicationStatus>;
+          applications?: ApplicationEntry[];
+        };
+        setApplicationsMap((aj.map ?? {}) as Record<string, ApplicationStatus>);
+        setApplicationsList((aj.applications ?? []) as ApplicationEntry[]);
       } catch {
         // non-fatal
       }
@@ -1025,6 +1052,26 @@ export default function App({ initialView = "dashboard" }: AppProps) {
     }
   }
 
+  async function saveApplication(job: JobRow, status: ApplicationStatus) {
+    const url = job.url;
+    setApplicationsMap((prev) => ({ ...prev, [url]: status }));
+    // Keep the settings list reasonably fresh client-side (API is source of truth)
+    setApplicationsList((prev) => {
+      const next = prev.filter((e) => e.url !== url);
+      next.unshift({ url, title: job.title, company: job.company, status });
+      return next;
+    });
+    try {
+      await apiFetch("/api/applications", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, title: job.title, company: job.company, status }),
+      });
+    } catch {
+      // non-fatal
+    }
+  }
+
   const displayAgents = agents.length > 0 ? agents : FALLBACK_AGENTS;
   const scrapePhaseText = useMemo(() => {
     const phase = scrapeStatus.phase;
@@ -1228,6 +1275,7 @@ export default function App({ initialView = "dashboard" }: AppProps) {
           resumeUploading={resumeUploading}
           reviewBusy={reviewBusy}
           scrapeSources={scrapeSources}
+          applications={applicationsList}
         />
       ) : null}
 
@@ -1389,6 +1437,24 @@ export default function App({ initialView = "dashboard" }: AppProps) {
                   >
                     {descOpen ? "Hide description" : "Description"}
                   </button>
+                  <div className="apply-btns">
+                    <button
+                      type="button"
+                      className={`apply-btn${applicationsMap[job.url] === "applied" ? " active applied" : ""}`}
+                      title="Mark as applied"
+                      onClick={() => saveApplication(job, "applied")}
+                    >
+                      Apply
+                    </button>
+                    <button
+                      type="button"
+                      className={`apply-btn${applicationsMap[job.url] === "not_applied" ? " active not-applied" : ""}`}
+                      title="Mark as not applied"
+                      onClick={() => saveApplication(job, "not_applied")}
+                    >
+                      Not apply
+                    </button>
+                  </div>
                   <div className="feedback-btns">
                     <button
                       type="button"
